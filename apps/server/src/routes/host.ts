@@ -8,6 +8,14 @@ import { listQuestions, createQuestion, updateQuestion, deleteQuestion, toggleEn
 import { listTeams, disqualifyTeam, reinstateTeam, adjustCoins, refundPurchase, cancelTradeAdmin, createAnnouncement, getLeaderboard, getAuditLog, getTransactions, getActivity, updateConfig, forceCloseMarket } from '../domain/admin';
 import { expireStaleTrades } from '../domain/trades';
 import { currentSeq, toGameMeta } from '../domain/serializers';
+import {
+  questionUpsertSchema,
+  questionImportSchema,
+  configUpdateSchema,
+  announcementSchema,
+  adminAdjustSchema,
+} from '@wcc/shared';
+import { validate } from '../middleware/validate';
 
 export const hostRouter = Router();
 
@@ -103,13 +111,13 @@ hostRouter.get('/questions', h(async (req: AuthedRequest, res: Response) => {
   res.json(await listQuestions(DB, req.game));
 }));
 
-hostRouter.post('/questions', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
+hostRouter.post('/questions', actionLimiter, validate(questionUpsertSchema), h(async (req: AuthedRequest, res: Response) => {
   const q = await createQuestion(DB, req.game, req.body);
   req.app.get('io')?.emitGameEvents([{ type: 'QUESTION_ADDED', t: Date.now(), questionCode: q.code }]);
   res.status(201).json(q);
 }));
 
-hostRouter.patch('/questions/:id', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
+hostRouter.patch('/questions/:id', actionLimiter, validate(questionUpsertSchema.partial()), h(async (req: AuthedRequest, res: Response) => {
   const q = await updateQuestion(DB, req.game, param(req, 'id'), req.body);
   req.app.get('io')?.emitGameEvents([{ type: 'QUESTION_ADDED', t: Date.now(), questionCode: q.code }]);
   res.json(q);
@@ -127,7 +135,7 @@ hostRouter.patch('/questions/:id/enabled', actionLimiter, h(async (req: AuthedRe
   res.json(q);
 }));
 
-hostRouter.post('/questions/import', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
+hostRouter.post('/questions/import', actionLimiter, validate(questionImportSchema), h(async (req: AuthedRequest, res: Response) => {
   const { questions } = req.body as { questions: object[] };
   const result = await importQuestions(DB, req.game, questions);
   req.app.get('io')?.emitGameEvents([{ type: 'QUESTION_ADDED', t: Date.now() }]);
@@ -140,7 +148,7 @@ hostRouter.get('/questions/export', h(async (req: AuthedRequest, res: Response) 
   res.json(qs);
 }));
 
-hostRouter.post('/coins/adjust', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
+hostRouter.post('/coins/adjust', actionLimiter, validate(adminAdjustSchema), h(async (req: AuthedRequest, res: Response) => {
   const { teamId, amount, reason } = req.body as { teamId: string; amount: number; reason: string };
   const result = await adjustCoins(DB, req.game, teamId, amount, reason);
   req.app.get('io')?.emitGameEvents([{ type: 'SCORE_UPDATED', t: Date.now() }]);
@@ -161,14 +169,14 @@ hostRouter.post('/trades/:id/cancel', actionLimiter, h(async (req: AuthedRequest
   res.json({ ok: true });
 }));
 
-hostRouter.post('/announcements', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
+hostRouter.post('/announcements', actionLimiter, validate(announcementSchema), h(async (req: AuthedRequest, res: Response) => {
   const { message } = req.body as { message: string };
   const a = await createAnnouncement(DB, req.game, message);
   req.app.get('io')?.emitGameEvents([{ type: 'ANNOUNCEMENT_CREATED', t: Date.now(), message: a.message }]);
   res.json(a);
 }));
 
-hostRouter.patch('/config', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
+hostRouter.patch('/config', actionLimiter, validate(configUpdateSchema), h(async (req: AuthedRequest, res: Response) => {
   await updateConfig(DB, req.game, req.body);
   res.json({ ok: true });
 }));

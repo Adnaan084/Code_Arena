@@ -2,6 +2,7 @@
 import { Router, Response, Request } from 'express';
 import { prisma as DB } from '../lib/prisma';
 import { findGameByCode } from '../domain/games';
+import { notFound } from '../lib/errors';
 import { toLeaderboard, currentSeq, toActivity } from '../domain/serializers';
 import { toGameMeta } from '../domain/serializers';
 
@@ -15,7 +16,7 @@ const param = (req: Request, name: string): string => {
 
 displayRouter.get('/:code', async (req: Request, res: Response) => {
   const game = await findGameByCode(DB, param(req, 'code').toUpperCase());
-  if (!game) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Game not found' } });
+  if (!game) throw notFound('Game not found.');
   const recent = await DB.gameEvent.findMany({
     where: { gameId: game.id },
     orderBy: { id: 'desc' },
@@ -33,7 +34,7 @@ displayRouter.get('/:code', async (req: Request, res: Response) => {
 
 displayRouter.get('/:code/events', async (req: Request, res: Response) => {
   const game = await findGameByCode(DB, param(req, 'code').toUpperCase());
-  if (!game) return res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Game not found' } });
+  if (!game) throw notFound('Game not found.');
   const { sinceSeq } = req.query as { sinceSeq?: string };
   const rows = await DB.gameEvent.findMany({
     where: { gameId: game.id, ...(sinceSeq ? { id: { gt: Number(sinceSeq) } } : {}) },

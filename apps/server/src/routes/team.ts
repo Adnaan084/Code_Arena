@@ -4,11 +4,19 @@ import { prisma as DB } from '../lib/prisma';
 import { type Difficulty, DIFFICULTIES } from '@wcc/shared';
 import { actionLimiter } from '../middleware/ratelimit';
 import { requireAuth, requireTeam, type AuthedRequest } from '../auth/guard';
+import { unauthorized } from '../lib/errors';
 import { listMarketplace, purchaseQuestion, listOwnedQuestions } from '../domain/market';
 import { submitAnswer } from '../domain/solve';
 import { listTrades, proposeTrade, acceptTrade, rejectTrade, cancelTrade } from '../domain/trades';
 import { toTeamSummary, currentSeq, toGameMeta } from '../domain/serializers';
 import { getLeaderboard, getTransactions, getActivity } from '../domain/admin';
+import {
+  purchaseSchema,
+  submitSchema,
+  createTradeSchema,
+  resolveTradeSchema,
+} from '@wcc/shared';
+import { validate } from '../middleware/validate';
 
 export const teamRouter = Router();
 
@@ -37,7 +45,7 @@ teamRouter.get('/state', h(async (req: AuthedRequest, res: Response) => {
   // req.team was authenticated by the guard against the presented token; refresh
   // it so coins/score/online reflect the latest committed state.
   const identity = await DB.team.findUnique({ where: { id: team.id } });
-  if (!identity) return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Session invalid' } });
+  if (!identity) throw unauthorized('Session invalid');
 
   const maxAttempts = (game.config as { maxAttempts?: number }).maxAttempts ?? 1;
   const [marketplace, inventory, transactions, leaderboard, activity, seq] = await Promise.all([
@@ -68,9 +76,8 @@ teamRouter.get('/marketplace', h(async (req: AuthedRequest, res: Response) => {
   res.json(items);
 }));
 
-teamRouter.post('/questions/:qid/purchase', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
-  const { idempotencyKey } = req.body as { idempotencyKey?: string };
-  if (!idempotencyKey) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'idempotencyKey is required' } });
+teamRouter.post('/questions/:qid/purchase', actionLimiter, validate(purchaseSchema), h(async (req: AuthedRequest, res: Response) => {
+  const { idempotencyKey } = req.body as { idempotencyKey: string };
   const result = await purchaseQuestion(DB, req.game, req.team!.id, param(req, 'qid'), idempotencyKey);
   if (result.ok && result.events.length) req.app.get('io')?.emitGameEvents(result.events);
   res.json(result);
@@ -82,11 +89,8 @@ teamRouter.get('/inventory', h(async (req: AuthedRequest, res: Response) => {
   res.json(inv);
 }));
 
-teamRouter.post('/questions/:qid/submit', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
-  const { idempotencyKey, answer } = req.body as { idempotencyKey: string; answer: any };
-  if (!idempotencyKey || !answer) {
-    return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'idempotencyKey and answer are required' } });
-  }
+teamRouter.post('/questions/:qid/submit', actionLimiter, validate(submitSchema), h(async (req: AuthedRequest, res: Response) => {
+  const { idempotencyKey, answer } = req.body as { idempotencyKey: string; answer: { kind: 'mcq'; selectedIndex: number } | { kind: 'free'; text: string } };
   const result = await submitAnswer(DB, req.game, req.team!.id, param(req, 'qid'), answer, idempotencyKey);
   if (result.events.length) req.app.get('io')?.emitGameEvents(result.events);
   res.json(result);
@@ -97,33 +101,29 @@ teamRouter.get('/trades', h(async (req: AuthedRequest, res: Response) => {
   res.json(trades);
 }));
 
-teamRouter.post('/trades', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
-  const { targetTeamId, offeredQuestionId, requestedQuestionId, coins, idempotencyKey } = req.body as any;
-  if (!idempotencyKey) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'idempotencyKey is required' } });
+teamRouter.post('/trades', actionLimiter, validate(createTradeSchema), h(async (req: AuthedRequest, res: Response) => {
+  const { targetTeamId, offeredQuestionId, requestedQuestionId, coins, idempotencyKey } = req.body as { targetTeamId: string; offeredQuestionId: string; requestedQuestionId: string; coins: number; idempotencyKey: string };
   const result = await proposeTrade(DB, req.game, req.team!.id, { targetTeamId, offeredQuestionId, requestedQuestionId, coins, idempotencyKey });
   if (result.events.length) req.app.get('io')?.emitGameEvents(result.events);
   res.json(result);
 }));
 
-teamRouter.post('/trades/:tid/accept', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
-  const { idempotencyKey } = req.body as { idempotencyKey?: string };
-  if (!idempotencyKey) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'idempotencyKey is required' } });
+teamRouter.post('/trades/:tid/accept', actionLimiter, validate(resolveTradeSchema), h(async (req: AuthedRequest, res: Response) => {
+  const { idempotencyKey } = req.body as { idempotencyKey: string };
   const result = await acceptTrade(DB, req.game, param(req, 'tid'), req.team!.id);
   if (result.events.length) req.app.get('io')?.emitGameEvents(result.events);
   res.json(result);
 }));
 
-teamRouter.post('/trades/:tid/reject', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
-  const { idempotencyKey } = req.body as { idempotencyKey?: string };
-  if (!idempotencyKey) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'idempotencyKey is required' } });
+teamRouter.post('/trades/:tid/reject', actionLimiter, validate(resolveTradeSchema), h(async (req: AuthedRequest, res: Response) => {
+  const { idempotencyKey } = req.body as { idempotencyKey: string };
   const result = await rejectTrade(DB, req.game, param(req, 'tid'), req.team!.id);
   if (result.events.length) req.app.get('io')?.emitGameEvents(result.events);
   res.json(result);
 }));
 
-teamRouter.post('/trades/:tid/cancel', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
-  const { idempotencyKey } = req.body as { idempotencyKey?: string };
-  if (!idempotencyKey) return res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'idempotencyKey is required' } });
+teamRouter.post('/trades/:tid/cancel', actionLimiter, validate(resolveTradeSchema), h(async (req: AuthedRequest, res: Response) => {
+  const { idempotencyKey } = req.body as { idempotencyKey: string };
   const result = await cancelTrade(DB, req.game, param(req, 'tid'), req.team!.id);
   if (result.events.length) req.app.get('io')?.emitGameEvents(result.events);
   res.json(result);

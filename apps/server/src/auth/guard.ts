@@ -3,12 +3,13 @@ import { Request, Response, NextFunction } from 'express';
 import type { Game, Team } from '@prisma/client';
 import { extractBearer, sha256 } from './tokens';
 import { DB } from '../lib/prisma';
+import { forbidden, unauthorized } from '../lib/errors';
 
 export type AuthedRequest = Request & { game: Game; team?: Team; role: 'HOST' | 'TEAM' };
 
 export async function requireAuth(req: Request, res: Response, next: NextFunction, db: DB) {
   const token = extractBearer(req);
-  if (!token) return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Missing Bearer token' } });
+  if (!token) throw unauthorized('Missing Bearer token');
   const hash = sha256(token);
 
   const gameHost = await db.game.findFirst({ where: { hostTokenHash: hash } });
@@ -29,19 +30,19 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     return next();
   }
 
-  return res.status(401).json({ error: { code: 'UNAUTHORIZED', message: 'Invalid or expired token' } });
+  throw unauthorized('Invalid or expired token');
 }
 
 /** Convenience: only HOST. Takes a plain Request; the role was stamped by requireAuth. */
 export function requireHost(req: Request, res: Response, next: NextFunction) {
-  if ((req as AuthedRequest).role !== 'HOST') return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Host access required' } });
+  if ((req as AuthedRequest).role !== 'HOST') throw forbidden('Host access required');
   next();
 }
 
 /** Convenience: only TEAM. Takes a plain Request; the role was stamped by requireAuth. */
 export function requireTeam(req: Request, res: Response, next: NextFunction) {
   const authed = req as AuthedRequest;
-  if (authed.role !== 'TEAM') return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Team access required' } });
-  if (!authed.team) return res.status(403).json({ error: { code: 'FORBIDDEN', message: 'Team not found' } });
+  if (authed.role !== 'TEAM') throw forbidden('Team access required');
+  if (!authed.team) throw forbidden('Team not found');
   next();
 }

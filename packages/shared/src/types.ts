@@ -244,6 +244,8 @@ export interface GameMeta {
   /** Remaining game time at the moment this state was produced, ms. */
   remainingMs: number | null;
   maxTeams: number;
+  /** Seats per team (2 for a two-player match). Drives lobby presence UX. */
+  playersPerTeam: number;
   gameDurationMinutes: number;
   announcements: AnnouncementDto[];
   lastEventSeq: number;

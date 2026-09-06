@@ -605,6 +605,61 @@ describe('socket.io sync', () => {
     expect(['MARKET_OPEN', 'FINAL_MINUTE']).toContain(sync.state);
     sock.disconnect();
   });
+
+  it('connects a public display socket without a token and receives PublicDisplayState', async () => {
+    const sock = io(baseUrl, {
+      query: { gameCode: g.gameCode, role: 'display', lastSeq: '0' },
+      transports: ['websocket'],
+      forceNew: true,
+    });
+    const sync = await once<{
+      meta: { code: string };
+      leaderboard: unknown[];
+      recentActivity: unknown[];
+      lastEventSeq: number;
+    }>(sock, 'state:sync');
+    expect(sync.meta.code).toBe(g.gameCode);
+    expect(Array.isArray(sync.leaderboard)).toBe(true);
+    expect(Array.isArray(sync.recentActivity)).toBe(true);
+    expect(typeof sync.lastEventSeq).toBe('number');
+    sock.disconnect();
+  });
+
+  it('rejects a display socket for an unknown game code', async () => {
+    const sock = io(baseUrl, {
+      query: { gameCode: 'NOPE00', role: 'display', lastSeq: '0' },
+      transports: ['websocket'],
+      forceNew: true,
+    });
+    const err = await once<{ code: string }>(sock, 'error');
+    expect(err.code).toBe('NOT_FOUND');
+    sock.disconnect();
+  });
+
+  it('broadcasts team:presence to teammates with a live connected seat count', async () => {
+    const sockA = teamSocket(g.gameCode, t.teamAccessToken);
+    await once(sockA, 'state:sync');
+
+    // Second teammate (same shared token) connects → A sees connectedCount 2.
+    const presenceP = once<{ teamId: string; online: boolean; connectedCount: number }>(sockA, 'team:presence');
+    const sockB = teamSocket(g.gameCode, t.teamAccessToken);
+    await once(sockB, 'state:sync');
+    const evt = await presenceP;
+    expect(evt).toMatchObject({ teamId: t.teamId, online: true, connectedCount: 2 });
+
+    // B drops → A sees connectedCount 1 but the team stays online.
+    const afterDrop = once<{ online: boolean; connectedCount: number }>(sockA, 'team:presence');
+    sockB.disconnect();
+    const drop = await afterDrop;
+    expect(drop).toMatchObject({ online: true, connectedCount: 1 });
+
+    // Last socket drops → persisted presence flips offline.
+    sockA.disconnect();
+    await new Promise((r) => setTimeout(r, 80));
+    const row = await admin.team.findUnique({ where: { id: t.teamId } });
+    expect(row!.online).toBe(false);
+    expect(row!.disconnectedAt).not.toBeNull();
+  });
 });
 
 // ─── Phase transitions & concurrency ────────────────────────────────────

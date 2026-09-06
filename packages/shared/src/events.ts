@@ -82,6 +82,8 @@ export interface TeamPresenceDto {
   teamId: string;
   name: string;
   online: boolean;
+  /** How many team sockets are currently connected (0..playersPerTeam). */
+  connectedCount: number;
   disconnectedAt: string | null;
 }
 

@@ -80,6 +80,7 @@ export function toGameMeta(
     endTime: game.endTime?.toISOString() ?? null,
     remainingMs: remainingMs(g, now),
     maxTeams: config.maxTeams,
+    playersPerTeam: config.playersPerTeam,
     gameDurationMinutes: config.gameDurationMinutes,
     announcements: announcements.map((a) => ({ id: a.id, message: a.message, createdAt: a.createdAt.toISOString() })),
     lastEventSeq: Number(lastEventSeq),

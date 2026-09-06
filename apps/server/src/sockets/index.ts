@@ -47,10 +47,14 @@ export function createSocketServer(app: Express, http: HttpServer) {
   };
 
   io.on('connection', (sock) => {
-    const { gameCode, token, role, lastSeq } = sock.handshake.query as Record<string, string>;
+    const q = sock.handshake.query;
+    const gameCode = String(q.gameCode ?? '');
+    const token = String(q.token ?? '');
+    const role = String(q.role ?? 'team');
+    const lastSeq = String(q.lastSeq ?? '0');
 
-    if (!gameCode || !token) {
-      sock.emit('error', { code: 'UNAUTHORIZED', message: 'Missing gameCode or token' });
+    if (!gameCode) {
+      sock.emit('error', { code: 'UNAUTHORIZED', message: 'Missing gameCode' });
       sock.disconnect(true);
       return;
     }
@@ -63,7 +67,14 @@ export function createSocketServer(app: Express, http: HttpServer) {
         return;
       }
 
-      const hash = sha256(token);
+      const isDisplay = role === 'display';
+      if (!token && !isDisplay) {
+        sock.emit('error', { code: 'UNAUTHORIZED', message: 'Missing token' });
+        sock.disconnect(true);
+        return;
+      }
+      const hash = token ? sha256(token) : '';
+
       if (role === 'host') {
         if (game.hostTokenHash !== hash) {
           sock.emit('error', { code: 'UNAUTHORIZED', message: 'Invalid host token' });
@@ -71,6 +82,10 @@ export function createSocketServer(app: Express, http: HttpServer) {
           return;
         }
         sock.join(`host:${game.code}`);
+        sock.join(`game:${game.code}`);
+      } else if (isDisplay) {
+        // Public projector: no auth beyond a valid game code; joins the game room
+        // so it receives state:sync, time:sync and game:event exactly like players.
         sock.join(`game:${game.code}`);
       } else {
         const team = await prisma.team.findFirst({ where: { gameId: game.id, accessTokenHash: hash } });
@@ -81,39 +96,52 @@ export function createSocketServer(app: Express, http: HttpServer) {
         }
         sock.join(`game:${game.code}`);
         sock.join(`team:${team.id}`);
-        await prisma.team.update({ where: { id: team.id }, data: { online: true } });
-        io.to(`host:${game.code}`).emit('team:presence', { teamId: team.id, name: team.name, online: true });
+        await prisma.team.update({ where: { id: team.id }, data: { online: true, disconnectedAt: null } });
+        // Both hosts and teammates see presence so "1/2 connected" is visible in-app.
+        const connectedCount = (await io.in(`team:${team.id}`).fetchSockets()).length;
+        const presence = { teamId: team.id, name: team.name, online: true, connectedCount, disconnectedAt: null };
+        io.to(`host:${game.code}`).emit('team:presence', presence);
+        io.to(`team:${team.id}`).emit('team:presence', presence);
       }
 
-      await sendState(sock, game.code, token, Number(lastSeq ?? 0));
+      await sendState(sock, game.code, token, role, Number(lastSeq ?? 0));
 
       sock.on('req:state', async () => {
-        await sendState(sock, game.code, token, Number(lastSeq ?? 0));
+        await sendState(sock, game.code, token, role, Number(lastSeq ?? 0));
       });
     })();
 
     sock.on('disconnect', async () => {
+      const token = String((sock.handshake.query as any)?.token ?? '');
+      // Display sockets carry no token; nothing to mark presence for.
+      if (!token) return;
       const team = await prisma.team.findFirst({
-        where: { accessTokenHash: sha256(String((sock.handshake.query as any)?.token ?? '')) },
+        where: { accessTokenHash: sha256(token) },
       });
       if (team) {
         const others = await io.in(`team:${team.id}`).fetchSockets();
-        // Only mark the team offline once NO socket remains — one teammate
-        // staying connected keeps the team online.
-        if (others.length === 0) {
-          await prisma.team.update({ where: { id: team.id }, data: { online: false } });
-          const game = await prisma.game.findUnique({ where: { id: team.gameId } });
-          if (game) io.to(`host:${game.code}`).emit('team:presence', { teamId: team.id, name: team.name, online: false });
+        const game = await prisma.game.findUnique({ where: { id: team.gameId } });
+        if (!game) return;
+        const connectedCount = others.length;
+        if (connectedCount === 0) {
+          await prisma.team.update({ where: { id: team.id }, data: { online: false, disconnectedAt: new Date() } });
         }
+        const presence = {
+          teamId: team.id,
+          name: team.name,
+          online: connectedCount > 0,
+          connectedCount,
+          disconnectedAt: connectedCount === 0 ? new Date().toISOString() : null,
+        };
+        io.to(`host:${game.code}`).emit('team:presence', presence);
+        io.to(`team:${team.id}`).emit('team:presence', presence);
       }
     });
   });
 
-  async function sendState(sock: import('socket.io').Socket, code: string, token: string, sinceSeq: number) {
+  async function sendState(sock: import('socket.io').Socket, code: string, token: string, role: string, sinceSeq: number) {
     const game = await prisma.game.findUnique({ where: { code } });
     if (!game) return;
-    const hash = sha256(token);
-    const isHost = game.hostTokenHash === hash;
     const seq = await currentSeq(prisma, game.id);
     const meta = toGameMeta(game, await prisma.announcement.findMany({ where: { gameId: game.id }, orderBy: { createdAt: 'desc' }, take: 10 }), seq);
     const lb = toLeaderboard(await prisma.team.findMany({ where: { gameId: game.id } }));
@@ -125,6 +153,13 @@ export function createSocketServer(app: Express, http: HttpServer) {
     });
     const activity = activityRaw.map(toActivity);
 
+    if (role === 'display') {
+      sock.emit('state:sync', { meta, leaderboard: lb, recentActivity: [...activity].reverse(), lastEventSeq: seq });
+      return;
+    }
+
+    const hash = sha256(token);
+    const isHost = game.hostTokenHash === hash;
     if (isHost) {
       const teams = (await prisma.team.findMany({ where: { gameId: game.id }, orderBy: { joinOrder: 'asc' } })).map(toTeamSummary);
       sock.emit('state:sync', { meta, teams, leaderboard: lb, activity, lastEventSeq: seq });

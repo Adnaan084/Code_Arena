@@ -1,0 +1,32 @@
+# "Will It Compile?" — local Postgres for the API (apps/server).
+#
+# Why host port 5433 instead of 5432? A native Windows PostgreSQL service
+# already listens on 0.0.0.0:5432 on typical dev machines, so connections to
+# localhost:5432 can be swallowed by *that* server instead of this container
+# (auth fails with P1000 even though the container credentials are correct).
+# Publishing on 5433 keeps this container unambiguous. If you have no native
+# Postgres, you may switch back to "5432:5432" and update DATABASE_URL.
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wcc-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wcc
+      POSTGRES_PASSWORD: wcc_password
+      POSTGRES_DB: wcc
+    ports:
+      - "5433:5432"
+    volumes:
+      - wcc-postgres-data:/var/lib/postgresql/data
+      # First-run only: also provisions the separate test database used by
+      # the smoke tests (TEST_DATABASE_URL in .env.example).
+      - ./apps/server/docker/init-test-db.sql:/docker-entrypoint-initdb.d/init-test-db.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wcc -d wcc"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  wcc-postgres-data:

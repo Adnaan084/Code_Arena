@@ -1,0 +1,30 @@
+{
+  "name": "wcc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Will It Compile? — live multiplayer C-programming marketplace game",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n server,web -c blue,green \"npm:dev:server\" \"npm:dev:web\"",
+    "dev:server": "npm run dev -w @wcc/server",
+    "dev:web": "npm run dev -w @wcc/web",
+    "build:web": "npm run build -w @wcc/web",
+    "typecheck": "npm run typecheck -ws --if-present",
+    "test": "npm run test -ws --if-present",
+    "test:e2e": "npm run test:e2e -w @wcc/web",
+    "test:load": "npm run test:load -w @wcc/server",
+    "db:migrate": "npm run db:migrate -w @wcc/server",
+    "db:seed": "npm run db:seed -w @wcc/server",
+    "db:reset": "npm run db:reset -w @wcc/server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "typescript": "^5.8.2"
+  }
+}

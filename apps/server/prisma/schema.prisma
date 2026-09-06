@@ -1,0 +1,353 @@
+// "Will It Compile?" — database schema (PostgreSQL).
+// Integrity is enforced by the DB (uniques, FKs, check constraints) in
+// addition to application-level validation. Never weaken these.
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ──────────────────────────────────────────────────────────────
+enum GameState {
+  LOBBY
+  MARKET_OPEN
+  FINAL_MINUTE
+  MARKET_CLOSED
+  FINAL_SCORING
+  COMPLETED
+}
+
+enum TeamStatus {
+  ACTIVE
+  DISQUALIFIED
+}
+
+enum QuestionType {
+  MULTIPLE_CHOICE
+  OUTPUT_PREDICTION
+  WILL_IT_COMPILE
+  FIND_ERROR
+  FIND_UB
+  SHORT_ANSWER
+  CODE_CORRECTION
+  CODING_CHALLENGE
+}
+
+enum Difficulty {
+  EASY
+  MEDIUM
+  HARD
+  EXTREME
+}
+
+enum QuestionStatus {
+  AVAILABLE
+  SOLD
+  DISABLED
+}
+
+enum OwnershipStatus {
+  UNSOLVED
+  SOLVED
+  FAILED
+}
+
+enum TradeState {
+  OPEN
+  EXECUTED
+  REJECTED
+  CANCELLED
+  EXPIRED
+}
+
+enum GameEventType {
+  GAME_STARTED
+  GAME_PAUSED
+  GAME_RESUMED
+  MARKET_OPENED
+  MARKET_CLOSED
+  GAME_COMPLETED
+  TEAM_JOINED
+  TEAM_DISQUALIFIED
+  TEAM_CONNECTED
+  TEAM_DISCONNECTED
+  QUESTION_ADDED
+  QUESTION_ENABLED
+  QUESTION_DISABLED
+  QUESTION_PURCHASED
+  QUESTION_SOLVED
+  QUESTION_FAILED
+  TRADE_CREATED
+  TRADE_ACCEPTED
+  TRADE_REJECTED
+  TRADE_CANCELLED
+  TRADE_EXPIRED
+  ANNOUNCEMENT_CREATED
+}
+
+enum TransactionType {
+  INITIAL
+  PURCHASE
+  REFUND
+  REWARD
+  TRADE_OUT
+  TRADE_IN
+  BONUS
+  PENALTY
+  ADMIN_ADJUST
+}
+
+// ─── Models ─────────────────────────────────────────────────────────────
+model Game {
+  id             String    @id @default(uuid())
+  code           String    @unique
+  title          String
+  state          GameState @default(LOBBY)
+  config         Json // validated GameConfig at create/update time
+  startTime      DateTime?
+  endTime        DateTime?
+  pausedAt       DateTime?
+  pausedTotalMs  Int       @default(0) // accumulated pause time, excluded from the clock
+  hostTokenHash  String // sha256 of the one-time host access key
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  teams         Team[]
+  questions     Question[]
+  ownerships    QuestionOwnership[]
+  purchases     Purchase[]
+  submissions   Submission[]
+  trades        Trade[]
+  transactions  Transaction[]
+  events        GameEvent[]
+  auditLogs     AuditLog[]
+  announcements Announcement[]
+}
+
+model Team {
+  id             String     @id @default(uuid())
+  gameId         String
+  game           Game       @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  name           String
+  accessTokenHash String // sha256 of the shared team access token
+  coins          Int        @default(0)
+  score          Int        @default(0)
+  rewardsEarned  Int        @default(0) // Σ rewards from correct submissions (scoring input)
+  solvedCount    Int        @default(0)
+  purchasedCount Int        @default(0)
+  failedCount    Int        @default(0)
+  tradeCount     Int        @default(0)
+  status         TeamStatus @default(ACTIVE)
+  online         Boolean    @default(false)
+  disconnectedAt DateTime?
+  joinOrder      Int
+  createdAt      DateTime   @default(now())
+
+  members       TeamMember[]
+  ownerships    QuestionOwnership[]
+  purchases     Purchase[]
+  submissions   Submission[]
+  tradesFrom    Trade[]    @relation("TradeFrom")
+  tradesTo      Trade[]    @relation("TradeTo")
+  transactions  Transaction[]
+  events        GameEvent[]
+
+  @@unique([gameId, name])
+  @@index([gameId])
+}
+
+model TeamMember {
+  id         String   @id @default(uuid())
+  teamId     String
+  team       Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  seat       Int // 1 or 2
+  playerName String
+  lastSeenAt DateTime @default(now())
+
+  @@unique([teamId, seat])
+}
+
+model Question {
+  id          String         @id @default(uuid())
+  gameId      String
+  game        Game           @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  code        String // e.g. Q017 (unique per game)
+  type        QuestionType
+  difficulty  Difficulty
+  category    String
+  title       String
+  body        String
+  codeSnippet String?
+  answerData  Json // AnswerData — never sent to team clients
+  price       Int
+  reward      Int
+  hint        String?
+  explanation String?
+  enabled     Boolean        @default(true)
+  status      QuestionStatus @default(AVAILABLE)
+  tradeCount  Int            @default(0)
+  maxTrades   Int            @default(2)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  ownership  QuestionOwnership?
+  purchases  Purchase[]
+  submissions Submission[]
+  tradeItems TradeItem[]
+
+  @@unique([gameId, code])
+  @@index([gameId, status])
+}
+
+model QuestionOwnership {
+  id            String           @id @default(uuid())
+  gameId        String
+  game          Game             @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  teamId        String
+  team          Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  questionId    String           @unique // DB guarantee: a question can have exactly one owner
+  question      Question         @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  status        OwnershipStatus  @default(UNSOLVED)
+  attemptsUsed  Int              @default(0)
+  tradeLock     Boolean          @default(false) // in-flight trade/submission guard
+  purchasePrice Int
+  reward        Int
+  purchasedAt   DateTime         @default(now())
+  submissions   Submission[]
+
+  @@index([teamId])
+  @@index([gameId])
+}
+
+model Purchase {
+  id           String   @id @default(uuid())
+  gameId       String
+  game         Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  teamId       String
+  team         Team     @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  questionId   String   @unique // DB guarantee: a question can be purchased once
+  question     Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  pricePaid    Int
+  reward       Int
+  idempotencyKey String?
+  createdAt    DateTime @default(now())
+
+  @@unique([teamId, idempotencyKey])
+}
+
+model Submission {
+  id             String           @id @default(uuid())
+  gameId         String
+  game           Game             @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  teamId         String
+  team           Team             @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  questionId     String
+  question       Question         @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  ownershipId    String
+  ownership      QuestionOwnership @relation(fields: [ownershipId], references: [id], onDelete: Cascade)
+  attemptNumber  Int
+  answer         Json // snapshot of what was submitted
+  isCorrect      Boolean
+  coinsAwarded   Int              @default(0)
+  idempotencyKey String?
+  submittedAt    DateTime         @default(now())
+
+  @@unique([teamId, idempotencyKey])
+  @@index([teamId, questionId])
+}
+
+model Trade {
+  id           String     @id @default(uuid())
+  gameId       String
+  game         Game       @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  fromTeamId   String
+  fromTeam     Team       @relation("TradeFrom", fields: [fromTeamId], references: [id])
+  toTeamId     String
+  toTeam       Team       @relation("TradeTo", fields: [toTeamId], references: [id])
+  coins        Int        @default(0) // coins the FROM team offers as part of the deal
+  state        TradeState @default(OPEN)
+  expiresAt    DateTime
+  createdAt    DateTime   @default(now())
+  executedAt   DateTime?
+  resolvedAt   DateTime?
+  idempotencyKey String?
+
+  items TradeItem[]
+
+  @@unique([gameId, fromTeamId, idempotencyKey])
+  @@index([gameId, state])
+  @@index([toTeamId, state])
+}
+
+model TradeItem {
+  id         String   @id @default(uuid())
+  tradeId    String
+  trade      Trade    @relation(fields: [tradeId], references: [id], onDelete: Cascade)
+  role       String // 'OFFERED' (from-team gives) | 'REQUESTED' (from-team wants)
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([tradeId, role, questionId])
+}
+
+model Transaction {
+  id           String          @id @default(uuid())
+  gameId       String
+  game         Game            @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  teamId       String
+  team         Team            @relation(fields: [teamId], references: [id], onDelete: Cascade)
+  type         TransactionType
+  amount       Int // signed: +reward/-purchase
+  balanceAfter Int
+  questionCode String?
+  tradeId      String?
+  reason       String?
+  createdAt    DateTime        @default(now())
+
+  @@index([teamId, createdAt])
+  @@index([gameId, createdAt])
+}
+
+model GameEvent {
+  id           BigInt        @id @default(autoincrement()) // monotonic seq for client resync
+  gameId       String
+  game         Game          @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  type         GameEventType
+  teamId       String?
+  team         Team?         @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  questionCode String?
+  payload      Json
+  message      String // pre-composed human-readable activity line
+  at           DateTime      @default(now())
+
+  @@index([gameId, id])
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  gameId    String
+  game      Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  actorType String // HOST | SYSTEM | TEAM
+  actorName String?
+  action    String
+  detail    Json?
+  reason    String?
+  createdAt DateTime @default(now())
+
+  @@index([gameId, createdAt])
+}
+
+model Announcement {
+  id        String   @id @default(uuid())
+  gameId    String
+  game      Game     @relation(fields: [gameId], references: [id], onDelete: Cascade)
+  message   String
+  createdAt DateTime @default(now())
+
+  @@index([gameId, createdAt])
+}

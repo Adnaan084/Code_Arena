@@ -27,6 +27,9 @@ export const gameConfigSchema = z.object({
   maxTradesPerQuestion: z.number().int().min(0).max(20),
   tradeWindowMinutes: z.number().int().min(1).max(180), // trades close this many minutes after start (<= duration)
   tradeTTLSeconds: z.number().int().min(30).max(3600), // open offer expiry
+  /* Auto phase transitions (server timer, after the clock passes boundaries) */
+  finalScoringDelaySeconds: z.number().int().min(0).max(3600), // MARKET_CLOSED → FINAL_SCORING after close
+  scoringDurationSeconds: z.number().int().min(0).max(3600), // FINAL_SCORING → COMPLETED
   /* Defaults applied when a question is created without explicit price/reward */
   priceTable: z.object({
     EASY: z.number().int().positive(),
@@ -62,6 +65,8 @@ export const DEFAULT_GAME_CONFIG: GameConfig = {
   maxTradesPerQuestion: 2,
   tradeWindowMinutes: 30,
   tradeTTLSeconds: 300,
+  finalScoringDelaySeconds: 10,
+  scoringDurationSeconds: 5,
   priceTable: { EASY: 120, MEDIUM: 300, HARD: 520, EXTREME: 750 },
   rewardTable: { EASY: 250, MEDIUM: 600, HARD: 950, EXTREME: 1300 },
   scoring: { coinsWeight: 1, rewardsWeight: 1, solvedBonus: 0, failPenalty: 0 },

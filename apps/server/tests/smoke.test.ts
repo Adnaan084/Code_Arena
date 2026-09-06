@@ -8,6 +8,8 @@
  *   - submissions (correct reward, wrong→FAILED, idempotency, attempt cap)
  *   - trades (propose→accept, ownership swap, coin pot)
  *   - Socket.IO sync (state:sync on connect, game:event, time:sync pulse)
+ *   - full phase lifecycle (FINAL_MINUTE/FINAL_SCORING/COMPLETED, idempotence,
+ *     restart persistence) and concurrency (sole-winner purchase / trade)
  *
  * DB selection: tests/setup.ts points DATABASE_URL at TEST_DATABASE_URL
  * before this file is imported, so the app's Prisma singleton and the socket
@@ -136,6 +138,11 @@ beforeAll(async () => {
 
   bundle = createApp();
   httpServer = bundle.http;
+  // Stop the auto 1s timer: the suite drives phase transitions deterministically
+  // via explicit timestamps + one-off packet.runPulse() calls, so a live tick
+  // would race those assertions (the timer could transition a game between a
+  // test's endTime update and its own advance call).
+  if (bundle.socket.timeTimer) clearInterval(bundle.socket.timeTimer);
   await new Promise<void>((resolve) => httpServer.listen(0, resolve));
   const { port } = httpServer.address() as AddressInfo;
   baseUrl = `http://127.0.0.1:${port}`;
@@ -590,9 +597,414 @@ describe('socket.io sync', () => {
 
   it('emits a time:sync pulse once the game has a clock', async () => {
     const sock = teamSocket(g.gameCode, t.teamAccessToken);
-    const sync = await once<{ remainingMs: number; state: string }>(sock, 'time:sync');
+    await once(sock, 'state:sync'); // ensure the socket is authenticated and in the room
+    const syncP = once<{ remainingMs: number; state: string }>(sock, 'time:sync');
+    await bundle.socket.runPulse(); // drive one deterministic pulse (auto timer is stopped)
+    const sync = await syncP;
     expect(sync.remainingMs).toBeGreaterThan(0);
     expect(['MARKET_OPEN', 'FINAL_MINUTE']).toContain(sync.state);
     sock.disconnect();
+  });
+});
+
+// ─── Phase transitions & concurrency ────────────────────────────────────
+describe('phase transitions & concurrency', () => {
+  let g: Awaited<ReturnType<typeof createGame>>;
+  let t: Awaited<ReturnType<typeof joinTeam>>;
+  let qBuy: Awaited<ReturnType<typeof createQuestion>>;
+
+  beforeAll(async () => {
+    g = await createGame('Phase Game');
+    t = await joinTeam(g.gameCode, 'Phase Team', 'Ada');
+    qBuy = await createQuestion(g.hostToken, question('PHS01'));
+    await startGame(g.gameCode, g.hostToken);
+  });
+
+  it('Test A — auto market close transitions to MARKET_CLOSED when time passes', async () => {
+    const game = await admin.game.findUnique({ where: { code: g.gameCode } });
+    await admin.game.update({
+      where: { id: game!.id },
+      data: { endTime: new Date(Date.now() - 5_000) }, // 5s ago
+    });
+    const { advancePhaseIfNeeded } = await import('../src/domain/games');
+    const { prisma } = await import('../src/lib/prisma');
+    const events = await advancePhaseIfNeeded(prisma, game!.id, new Date());
+    expect(events.some((e: any) => e.type === 'MARKET_CLOSED')).toBe(true);
+
+    const state = await request(bundle.app).get(`/api/public/games/${g.gameCode}`);
+    expect(state.body.state).toBe('MARKET_CLOSED');
+  });
+
+  it('Test B — repeated advancePhaseIfNeeded calls are idempotent (no duplicate events)', async () => {
+    const { advancePhaseIfNeeded } = await import('../src/domain/games');
+    const { prisma } = await import('../src/lib/prisma');
+    const game = await admin.game.findUnique({ where: { code: g.gameCode } });
+
+    const events1 = await advancePhaseIfNeeded(prisma, game!.id, new Date());
+    const events2 = await advancePhaseIfNeeded(prisma, game!.id, new Date());
+    const events3 = await advancePhaseIfNeeded(prisma, game!.id, new Date());
+
+    expect(events1.length).toBe(0);
+    expect(events2.length).toBe(0);
+    expect(events3.length).toBe(0);
+
+    const geCount = await admin.gameEvent.count({ where: { gameId: game!.id } });
+    const geCount2 = await admin.gameEvent.count({ where: { gameId: game!.id } });
+    expect(geCount).toBe(geCount2);
+  });
+});
+
+describe('full phase lifecycle (FINAL_MINUTE → FINAL_SCORING → COMPLETED)', () => {
+  it('Test I — MARKET_OPEN → FINAL_MINUTE exactly once when ≤60s remain', async () => {
+    const g = await createGame('Lifecycle Final Minute');
+    await joinTeam(g.gameCode, 'Alpha', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+    const game = await admin.game.findUnique({ where: { code: g.gameCode } });
+    const { advancePhaseIfNeeded } = await import('../src/domain/games');
+    const { prisma } = await import('../src/lib/prisma');
+
+    // Clock inside the final-minute window but before the deadline (endTime 30s out):
+    // the pulse must move MARKET_OPEN → FINAL_MINUTE and must NOT close the market.
+    await admin.game.update({ where: { id: game!.id }, data: { endTime: new Date(Date.now() + 30_000) } });
+
+    await advancePhaseIfNeeded(prisma, game!.id, new Date());
+
+    let fresh = await admin.game.findUnique({ where: { id: game!.id } });
+    expect(fresh!.state).toBe('FINAL_MINUTE');
+    const finalMinuteEvents = await admin.gameEvent.count({ where: { gameId: game!.id, type: 'FINAL_MINUTE' } });
+    const marketClosedEvents = await admin.gameEvent.count({ where: { gameId: game!.id, type: 'MARKET_CLOSED' } });
+    expect(finalMinuteEvents).toBe(1);
+    expect(marketClosedEvents).toBe(0);
+
+    // Idempotent: further pulses emit nothing new and leave the state untouched.
+    const events2 = await advancePhaseIfNeeded(prisma, game!.id, new Date());
+    expect(events2).toHaveLength(0);
+    fresh = await admin.game.findUnique({ where: { id: game!.id } });
+    expect(fresh!.state).toBe('FINAL_MINUTE');
+  });
+
+  it('Test J — MARKET_CLOSED → FINAL_SCORING → COMPLETED with a single, idempotent recompute', async () => {
+    const g = await createGame('Lifecycle Scoring');
+    await joinTeam(g.gameCode, 'Alpha', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+    const { advancePhaseIfNeeded } = await import('../src/domain/games');
+    const { prisma } = await import('../src/lib/prisma');
+    let game = await admin.game.findUnique({ where: { code: g.gameCode } });
+
+    const endTime = new Date(Date.now() - 5_000); // deadline already passed
+    await admin.game.update({ where: { id: game!.id }, data: { endTime } });
+    await advancePhaseIfNeeded(prisma, game!.id, new Date());
+    game = await admin.game.findUnique({ where: { id: game!.id } });
+    expect(game!.state).toBe('MARKET_CLOSED');
+
+    // NOTE: the MARKET_CLOSED claim rewrites endTime to the pulse time (now), so the
+    // scoring window is measured from the *persisted* end-of-market, not our original
+    // endTime. Re-read it so the boundaries are deterministic.
+    const closedAt = game!.endTime!.getTime();
+
+    // FINAL_SCORING fires only once the configured delay (10s) has elapsed. The live
+    // 1s timer clock is nowhere near it yet, so an explicit pulse at closed+delay+1s
+    // is the sole driver — no race.
+    const scoringAt = new Date(closedAt + 10_000 + 1_000);
+    await advancePhaseIfNeeded(prisma, game!.id, scoringAt);
+    game = await admin.game.findUnique({ where: { id: game!.id } });
+    expect(game!.state).toBe('FINAL_SCORING');
+    expect(await admin.gameEvent.count({ where: { gameId: game!.id, type: 'FINAL_SCORING' } })).toBe(1);
+
+    // COMPLETED fires after the scoring window (5s) and recomputes every score.
+    const completeAt = new Date(closedAt + 10_000 + 5_000 + 1_000);
+    await advancePhaseIfNeeded(prisma, game!.id, completeAt);
+    game = await admin.game.findUnique({ where: { id: game!.id } });
+    expect(game!.state).toBe('COMPLETED');
+    expect(await admin.gameEvent.count({ where: { gameId: game!.id, type: 'GAME_COMPLETED' } })).toBe(1);
+
+    // Idempotent at the terminal state too.
+    const late = await advancePhaseIfNeeded(prisma, game!.id, completeAt);
+    expect(late).toHaveLength(0);
+    expect(await admin.gameEvent.count({ where: { gameId: game!.id, type: 'GAME_COMPLETED' } })).toBe(1);
+  });
+
+  it('Test K — phase survives a server restart: derived purely from persisted timestamps', async () => {
+    const g = await createGame('Lifecycle Restart');
+    await joinTeam(g.gameCode, 'Alpha', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+    const { effectiveState } = await import('@wcc/shared');
+    const game = await admin.game.findUnique({ where: { code: g.gameCode } });
+
+    await admin.game.update({ where: { id: game!.id }, data: { endTime: new Date(Date.now() - 5_000) } });
+
+    // A restarted process has no in-memory state: it re-reads the row and derives the
+    // phase from stored timestamps. The persisted row alone must yield MARKET_CLOSED —
+    // proving a restart cannot lose or reset the authoritative clock.
+    const row = await admin.game.findUnique({ where: { id: game!.id } });
+    expect(
+      effectiveState(
+        { state: row!.state, pausedAt: row!.pausedAt, startTime: row!.startTime, endTime: row!.endTime },
+        new Date(),
+      ),
+    ).toBe('MARKET_CLOSED');
+
+    // And the restarted server's first timer pulse catches the row up to the persisted
+    // boundary so the stored state agrees with what clients already saw.
+    const { advancePhaseIfNeeded } = await import('../src/domain/games');
+    const { prisma } = await import('../src/lib/prisma');
+    await advancePhaseIfNeeded(prisma, game!.id, new Date());
+    const after = await admin.game.findUnique({ where: { id: game!.id } });
+    expect(after!.state).toBe('MARKET_CLOSED');
+  });
+});
+
+describe('trade expiration', () => {
+  let g: Awaited<ReturnType<typeof createGame>>;
+  let a: Awaited<ReturnType<typeof joinTeam>>;
+  let b: Awaited<ReturnType<typeof joinTeam>>;
+  let qA: Awaited<ReturnType<typeof createQuestion>>;
+  let qB: Awaited<ReturnType<typeof createQuestion>>;
+
+  beforeAll(async () => {
+    g = await createGame('Trade Expire');
+    a = await joinTeam(g.gameCode, 'Alpha', 'Ada');
+    b = await joinTeam(g.gameCode, 'Beta', 'Lin');
+    qA = await createQuestion(g.hostToken, question('EXP01'));
+    qB = await createQuestion(g.hostToken, question('EXP02'));
+    await startGame(g.gameCode, g.hostToken);
+    await request(bundle.app).post(`/api/team/questions/${qA.id}/purchase`).set(hostAuth(a.teamAccessToken)).send({ idempotencyKey: idem() });
+    await request(bundle.app).post(`/api/team/questions/${qB.id}/purchase`).set(hostAuth(b.teamAccessToken)).send({ idempotencyKey: idem() });
+  });
+
+  it('Test C — stale trade expiration marks trade EXPIRED and releases tradeLock', async () => {
+    const propose = await request(bundle.app).post('/api/team/trades').set(hostAuth(a.teamAccessToken)).send({
+      targetTeamId: b.teamId,
+      offeredQuestionId: qA.id,
+      requestedQuestionId: qB.id,
+      coins: 0,
+      idempotencyKey: idem(),
+    });
+    expect(propose.status).toBe(200);
+    const tradeId = propose.body.tradeId as string;
+
+    await admin.trade.update({ where: { id: tradeId }, data: { expiresAt: new Date(Date.now() - 1_000) } });
+
+    const { expireStaleTrades } = await import('../src/domain/trades');
+    const { prisma } = await import('../src/lib/prisma');
+    const expireGame = await admin.game.findUnique({ where: { code: g.gameCode } });
+    if (!expireGame) throw new Error('game not found for trade expiry');
+    const events = await expireStaleTrades(prisma, expireGame);
+    expect(events.some((e: any) => e.type === 'TRADE_EXPIRED')).toBe(true);
+
+    const t2 = await admin.trade.findUnique({ where: { id: tradeId } });
+    expect(t2!.state).toBe('EXPIRED');
+
+    const o1 = await admin.questionOwnership.findUnique({ where: { questionId: qA.id } });
+    const o2 = await admin.questionOwnership.findUnique({ where: { questionId: qB.id } });
+    expect(o1!.tradeLock).toBe(false);
+    expect(o2!.tradeLock).toBe(false);
+  });
+
+  it('Test D — accepting an expired trade is rejected with CONFLICT', async () => {
+    // Use FRESH questions that haven't been swapped by Test C
+    const qA2 = await createQuestion(g.hostToken, question('EXP03'));
+    const qB2 = await createQuestion(g.hostToken, question('EXP04'));
+    await request(bundle.app).post(`/api/team/questions/${qA2.id}/purchase`).set(hostAuth(a.teamAccessToken)).send({ idempotencyKey: idem() });
+    await request(bundle.app).post(`/api/team/questions/${qB2.id}/purchase`).set(hostAuth(b.teamAccessToken)).send({ idempotencyKey: idem() });
+
+    const propose = await request(bundle.app).post('/api/team/trades').set(hostAuth(a.teamAccessToken)).send({
+      targetTeamId: b.teamId,
+      offeredQuestionId: qA2.id,   // Alpha owns qA2
+      requestedQuestionId: qB2.id, // Alpha wants qB2
+      coins: 0,
+      idempotencyKey: idem(),
+    });
+    expect(propose.status).toBe(200);
+    const tradeId = propose.body.tradeId as string;
+
+    await admin.trade.update({ where: { id: tradeId }, data: { expiresAt: new Date(Date.now() - 1_000) } });
+
+    const accept = await request(bundle.app)
+      .post(`/api/team/trades/${tradeId}/accept`)
+      .set(hostAuth(b.teamAccessToken))
+      .send({ idempotencyKey: idem() });
+    expect(accept.status).toBe(409);
+    expect(accept.body.error.code).toBe('CONFLICT');
+  });
+});
+
+describe('phase broadcast events', () => {
+  let g: Awaited<ReturnType<typeof createGame>>;
+  let t: Awaited<ReturnType<typeof joinTeam>>;
+
+  beforeAll(async () => {
+    g = await createGame('Phase Broadcast');
+    t = await joinTeam(g.gameCode, 'Broadcaster', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+  });
+
+  it('Test G — MARKET_CLOSED event is emitted exactly once on phase change', async () => {
+    const game = await admin.game.findUnique({ where: { code: g.gameCode } });
+    await admin.game.update({ where: { id: game!.id }, data: { endTime: new Date(Date.now() - 5_000) } });
+
+    const sock = io(baseUrl, {
+      query: { gameCode: g.gameCode, token: t.teamAccessToken, role: 'team', lastSeq: '0' },
+      transports: ['websocket'],
+      forceNew: true,
+    });
+    const events: any[] = [];
+    sock.on('game:event', (e) => events.push(e));
+    await once(sock, 'state:sync'); // auth + room join complete — then drive one pulse
+
+    // One deterministic pulse performs the MARKET_CLOSED transition AND broadcasts
+    // it (the auto 1s timer is stopped, so nothing else can transition or emit).
+    await bundle.socket.runPulse();
+    await new Promise((r) => setTimeout(r, 120));
+    sock.disconnect();
+
+    const closed = events.filter((e) => e.type === 'MARKET_CLOSED');
+    expect(closed.length).toBe(1);
+  });
+});
+
+describe('reconnect around phase boundary', () => {
+  let g: Awaited<ReturnType<typeof createGame>>;
+  let t: Awaited<ReturnType<typeof joinTeam>>;
+
+  beforeAll(async () => {
+    g = await createGame('Reconnect Phase');
+    t = await joinTeam(g.gameCode, 'Reconnector', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+  });
+
+  it('Test H — client reconnecting after phase change sees correct authoritative state', async () => {
+    const { advancePhaseIfNeeded } = await import('../src/domain/games');
+    const { prisma } = await import('../src/lib/prisma');
+    const game = await admin.game.findUnique({ where: { code: g.gameCode } });
+
+    await admin.game.update({ where: { id: game!.id }, data: { endTime: new Date(Date.now() - 5_000) } });
+    await advancePhaseIfNeeded(prisma, game!.id, new Date());
+
+    const sock = io(baseUrl, {
+      query: { gameCode: g.gameCode, token: t.teamAccessToken, role: 'team', lastSeq: '0' },
+      transports: ['websocket'],
+      forceNew: true,
+    });
+    const sync = await new Promise<any>((resolve) => {
+      sock.once('state:sync', resolve);
+    });
+    sock.disconnect();
+
+    expect(sync.meta.state).toBe('MARKET_CLOSED');
+    expect(sync.meta.phase.marketOpen).toBe(false);
+  });
+});
+
+// ─── Concurrency stress tests (40-team simulation) ──────────────────────
+describe('concurrency: simultaneous purchase (10 teams)', () => {
+  let g: Awaited<ReturnType<typeof createGame>>;
+  let teams: Awaited<ReturnType<typeof joinTeam>>[];
+  let q: Awaited<ReturnType<typeof createQuestion>>;
+
+  beforeAll(async () => {
+    g = await createGame('Concurrency 10');
+    teams = [];
+    for (let i = 0; i < 10; i++) {
+      teams.push(await joinTeam(g.gameCode, `Team${i}`, `P${i}a`, `P${i}b`));
+    }
+    q = await createQuestion(g.hostToken, question('CONC01'));
+    await startGame(g.gameCode, g.hostToken);
+  });
+
+  it('Test E — exactly one team purchases the single available question', async () => {
+    const attempts = teams.map((team) =>
+      request(bundle.app)
+        .post(`/api/team/questions/${q.id}/purchase`)
+        .set(hostAuth(team.teamAccessToken))
+        .send({ idempotencyKey: idem() })
+    );
+    const results = await Promise.all(attempts);
+
+    const successful = results.filter((r) => r.status === 200 && r.body.ok && !r.body.already);
+
+    // The critical correctness property: exactly one team owns the question
+    expect(successful.length).toBe(1);
+
+    const ownerships = await admin.questionOwnership.findMany({ where: { questionId: q.id } });
+    expect(ownerships.length).toBe(1);
+    const winner = await admin.team.findUnique({ where: { id: ownerships[0]!.teamId } });
+    // question() helper charges price 100, so the winner pays exactly 100 → 900 coins.
+    expect(winner!.coins).toBeLessThanOrEqual(900);
+    expect(winner!.coins).toBeGreaterThanOrEqual(800);
+  });
+});
+
+describe('concurrency: simultaneous trade acceptance', () => {
+  let g: Awaited<ReturnType<typeof createGame>>;
+  let a: Awaited<ReturnType<typeof joinTeam>>;
+  let b: Awaited<ReturnType<typeof joinTeam>>;
+  let c: Awaited<ReturnType<typeof joinTeam>>;
+  let qA: Awaited<ReturnType<typeof createQuestion>>;
+  let qB: Awaited<ReturnType<typeof createQuestion>>;
+
+  beforeAll(async () => {
+    g = await createGame('Concurrent Trade');
+    a = await joinTeam(g.gameCode, 'Alpha', 'Ada');
+    b = await joinTeam(g.gameCode, 'Beta', 'Lin');
+    c = await joinTeam(g.gameCode, 'Gamma', 'Ken');
+    qA = await createQuestion(g.hostToken, question('CTD01'));
+    qB = await createQuestion(g.hostToken, question('CTD02'));
+    await startGame(g.gameCode, g.hostToken);
+    await request(bundle.app).post(`/api/team/questions/${qA.id}/purchase`).set(hostAuth(a.teamAccessToken)).send({ idempotencyKey: idem() });
+    await request(bundle.app).post(`/api/team/questions/${qB.id}/purchase`).set(hostAuth(b.teamAccessToken)).send({ idempotencyKey: idem() });
+  });
+
+  it('Test F — only one accept succeeds when two teams race to accept the same trade', async () => {
+    const propose = await request(bundle.app).post('/api/team/trades').set(hostAuth(a.teamAccessToken)).send({
+      targetTeamId: b.teamId,
+      offeredQuestionId: qA.id,
+      requestedQuestionId: qB.id,
+      coins: 50,
+      idempotencyKey: idem(),
+    });
+    expect(propose.status).toBe(200);
+    const tradeId = propose.body.tradeId as string;
+
+    const acceptBeta = request(bundle.app)
+      .post(`/api/team/trades/${tradeId}/accept`)
+      .set(hostAuth(b.teamAccessToken))
+      .send({ idempotencyKey: idem() });
+    const acceptBeta2 = request(bundle.app)
+      .post(`/api/team/trades/${tradeId}/accept`)
+      .set(hostAuth(b.teamAccessToken))
+      .send({ idempotencyKey: idem() });
+
+    const [r1, r2] = await Promise.all([acceptBeta, acceptBeta2]);
+
+    const successful = [r1, r2].filter((r) => r.status === 200);
+    const conflicts = [r1, r2].filter((r) => r.status === 409 && r.body.error.code === 'TRADE_STATE');
+
+    expect(successful.length).toBe(1);
+    expect(conflicts.length).toBe(1);
+
+    const trade = await admin.trade.findUnique({ where: { id: tradeId } });
+    expect(trade!.state).toBe('EXECUTED');
+
+    // Ownership integrity: exactly one owner per question, swapped exactly once,
+    // no question duplicated and no residual tradeLock on either.
+    const ownA = await admin.questionOwnership.findUnique({ where: { questionId: qA.id } });
+    const ownB = await admin.questionOwnership.findUnique({ where: { questionId: qB.id } });
+    expect(ownA!.teamId).toBe(b.teamId); // offered qA moved to Beta
+    expect(ownB!.teamId).toBe(a.teamId); // requested qB moved to Alpha
+    expect(ownA!.tradeLock).toBe(false);
+    expect(ownB!.tradeLock).toBe(false);
+    const ownersOfA = await admin.questionOwnership.count({ where: { questionId: qA.id } });
+    const ownersOfB = await admin.questionOwnership.count({ where: { questionId: qB.id } });
+    expect(ownersOfA).toBe(1);
+    expect(ownersOfB).toBe(1);
+
+    // Coin integrity: the 50-coin transfer happened exactly once (not doubled/lost).
+    // The question() helper charges price 100: Alpha = 1000 - 100 (buy qA) - 50 (pay) = 850,
+    // Beta = 1000 - 100 (buy qB) + 50 (receive) = 950.
+    const alpha = await admin.team.findUnique({ where: { id: a.teamId } });
+    const beta = await admin.team.findUnique({ where: { id: b.teamId } });
+    expect(alpha!.coins).toBe(850);
+    expect(beta!.coins).toBe(950);
   });
 });

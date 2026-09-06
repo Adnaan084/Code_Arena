@@ -5,17 +5,46 @@ import type { Express } from 'express';
 import { prisma } from '../lib/prisma';
 import { sha256 } from '../auth/tokens';
 import { toGameMeta, toLeaderboard, currentSeq, toActivity, toTeamSummary, toMarketItem, toTradeDto, toInventoryItem } from '../domain/serializers';
+import { advancePhaseIfNeeded } from '../domain/games';
+import { expireStaleTrades } from '../domain/trades';
 import { effectiveState, phaseRules, type RuleConfig } from '@wcc/shared';
 
 export interface SioHandle {
-  emitGameEvents(events: Array<{ type: string; t: number; questionCode?: string }>): void;
+  /** Broadcast domain events to the game room (host + team + display sockets). */
+  emitGameEvents(gameCode: string, events: Array<{ type: string; t: number; questionCode?: string }>): void;
 }
 
+/** Persisted domain event → wire broadcast shape ({ at } → { t }). */
+function toWireEvent(e: { type: string; at: Date; questionCode: string | null }): { type: string; t: number; questionCode?: string } {
+  return {
+    type: e.type,
+    t: e.at.getTime(),
+    ...(e.questionCode ? { questionCode: e.questionCode } : {}),
+  };
+}
+
+/**
+ * A single authoritative timer pulse feeds every game's phase advancement and
+ * stale-trade sweep, then pushes a time sync. A `pulseRunning` guard keeps the
+ * pulse non-overlapping so the clock (and the transitions it drives) can never
+ * be mutated by two ticks at once. All transitions themselves are idempotent
+ * conditional claims, so even overlapping pulses (e.g. a second server process)
+ * would be safe.
+ */
 export function createSocketServer(app: Express, http: HttpServer) {
   const io = new IOServer(http, {
     cors: { origin: '*', methods: ['GET', 'POST'] },
     transports: ['websocket', 'polling'],
   });
+
+  const handle: SioHandle = {
+    emitGameEvents(gameCode: string, events: Array<{ type: string; t: number; questionCode?: string }>) {
+      for (const e of events) {
+        // Room-scoped: only sockets in this game receive its events.
+        io.to(`game:${gameCode}`).emit('game:event', e);
+      }
+    },
+  };
 
   io.on('connection', (sock) => {
     const { gameCode, token, role, lastSeq } = sock.handshake.query as Record<string, string>;
@@ -69,7 +98,9 @@ export function createSocketServer(app: Express, http: HttpServer) {
       });
       if (team) {
         const others = await io.in(`team:${team.id}`).fetchSockets();
-        if (others.length <= 1) {
+        // Only mark the team offline once NO socket remains — one teammate
+        // staying connected keeps the team online.
+        if (others.length === 0) {
           await prisma.team.update({ where: { id: team.id }, data: { online: false } });
           const game = await prisma.game.findUnique({ where: { id: team.gameId } });
           if (game) io.to(`host:${game.code}`).emit('team:presence', { teamId: team.id, name: team.name, online: false });
@@ -115,11 +146,30 @@ export function createSocketServer(app: Express, http: HttpServer) {
     }
   }
 
-  // Time sync pulse every second.
-  const timeTimer = setInterval(async () => {
+  // ── Authoritative timer pulse (single driver, never overlapping) ──────
+  let pulseRunning = false;
+  /**
+   * Run one full pulse over every game: advance persisted phase transitions,
+   * sweep stale trade offers, then push a time sync to each game room. The
+   * auto-interval calls this once a second; it is also exported so the test
+   * harness can drive a *single* deterministic pulse (tests stop the interval
+   * to avoid racing a live clock against explicit timestamps).
+   */
+  const runPulse = async () => {
+    if (pulseRunning) return;
+    pulseRunning = true;
     try {
       const games = await prisma.game.findMany();
       for (const game of games) {
+        // 1. Advance persisted phase transitions as the clock crosses boundaries.
+        const phaseEvents = await advancePhaseIfNeeded(prisma, game.id);
+        if (phaseEvents.length) handle.emitGameEvents(game.code, phaseEvents.map(toWireEvent));
+
+        // 2. Sweep stale open trade offers (conditional claims → idempotent).
+        const tradeEvents = await expireStaleTrades(prisma, game);
+        if (tradeEvents.length) handle.emitGameEvents(game.code, tradeEvents.map(toWireEvent));
+
+        // 3. Push the authoritative clock + derived phase to every socket.
         const g = { state: game.state, pausedAt: game.pausedAt, startTime: game.startTime, endTime: game.endTime };
         const remaining = game.endTime ? Math.max(0, game.endTime.getTime() - Date.now()) : null;
         if (remaining === null) continue;
@@ -136,22 +186,17 @@ export function createSocketServer(app: Express, http: HttpServer) {
       }
     } catch (e) {
       console.error('time-sync error', e);
+    } finally {
+      pulseRunning = false;
     }
+  };
+  const timeTimer = setInterval(() => {
+    void runPulse();
   }, 1000);
 
   process.on('beforeExit', () => clearInterval(timeTimer));
 
-  const handle: SioHandle = {
-    emitGameEvents(events: Array<{ type: string; t: number; questionCode?: string }>) {
-      for (const e of events) {
-        // Broadcast activity + leaderboard to all game rooms (host + teams + display)
-        // Activity feed is pushed directly via event type.
-        io.emit('game:event', e);
-      }
-    },
-  };
-
-  return { io, handle, timeTimer };
+  return { io, handle, timeTimer, runPulse };
 }
 
 export type SocketServerHandle = ReturnType<typeof createSocketServer>;

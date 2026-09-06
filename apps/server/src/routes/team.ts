@@ -79,7 +79,7 @@ teamRouter.get('/marketplace', h(async (req: AuthedRequest, res: Response) => {
 teamRouter.post('/questions/:qid/purchase', actionLimiter, validate(purchaseSchema), h(async (req: AuthedRequest, res: Response) => {
   const { idempotencyKey } = req.body as { idempotencyKey: string };
   const result = await purchaseQuestion(DB, req.game, req.team!.id, param(req, 'qid'), idempotencyKey);
-  if (result.ok && result.events.length) req.app.get('io')?.emitGameEvents(result.events);
+  if (result.ok && result.events.length) req.app.get('io')?.emitGameEvents(req.game.code, result.events);
   res.json(result);
 }));
 
@@ -92,7 +92,7 @@ teamRouter.get('/inventory', h(async (req: AuthedRequest, res: Response) => {
 teamRouter.post('/questions/:qid/submit', actionLimiter, validate(submitSchema), h(async (req: AuthedRequest, res: Response) => {
   const { idempotencyKey, answer } = req.body as { idempotencyKey: string; answer: { kind: 'mcq'; selectedIndex: number } | { kind: 'free'; text: string } };
   const result = await submitAnswer(DB, req.game, req.team!.id, param(req, 'qid'), answer, idempotencyKey);
-  if (result.events.length) req.app.get('io')?.emitGameEvents(result.events);
+  if (result.events.length) req.app.get('io')?.emitGameEvents(req.game.code, result.events);
   res.json(result);
 }));
 
@@ -104,28 +104,28 @@ teamRouter.get('/trades', h(async (req: AuthedRequest, res: Response) => {
 teamRouter.post('/trades', actionLimiter, validate(createTradeSchema), h(async (req: AuthedRequest, res: Response) => {
   const { targetTeamId, offeredQuestionId, requestedQuestionId, coins, idempotencyKey } = req.body as { targetTeamId: string; offeredQuestionId: string; requestedQuestionId: string; coins: number; idempotencyKey: string };
   const result = await proposeTrade(DB, req.game, req.team!.id, { targetTeamId, offeredQuestionId, requestedQuestionId, coins, idempotencyKey });
-  if (result.events.length) req.app.get('io')?.emitGameEvents(result.events);
+  if (result.events.length) req.app.get('io')?.emitGameEvents(req.game.code, result.events);
   res.json(result);
 }));
 
 teamRouter.post('/trades/:tid/accept', actionLimiter, validate(resolveTradeSchema), h(async (req: AuthedRequest, res: Response) => {
   const { idempotencyKey } = req.body as { idempotencyKey: string };
   const result = await acceptTrade(DB, req.game, param(req, 'tid'), req.team!.id);
-  if (result.events.length) req.app.get('io')?.emitGameEvents(result.events);
+  if (result.events.length) req.app.get('io')?.emitGameEvents(req.game.code, result.events);
   res.json(result);
 }));
 
 teamRouter.post('/trades/:tid/reject', actionLimiter, validate(resolveTradeSchema), h(async (req: AuthedRequest, res: Response) => {
   const { idempotencyKey } = req.body as { idempotencyKey: string };
   const result = await rejectTrade(DB, req.game, param(req, 'tid'), req.team!.id);
-  if (result.events.length) req.app.get('io')?.emitGameEvents(result.events);
+  if (result.events.length) req.app.get('io')?.emitGameEvents(req.game.code, result.events);
   res.json(result);
 }));
 
 teamRouter.post('/trades/:tid/cancel', actionLimiter, validate(resolveTradeSchema), h(async (req: AuthedRequest, res: Response) => {
   const { idempotencyKey } = req.body as { idempotencyKey: string };
   const result = await cancelTrade(DB, req.game, param(req, 'tid'), req.team!.id);
-  if (result.events.length) req.app.get('io')?.emitGameEvents(result.events);
+  if (result.events.length) req.app.get('io')?.emitGameEvents(req.game.code, result.events);
   res.json(result);
 }));
 

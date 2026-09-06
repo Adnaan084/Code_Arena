@@ -4,12 +4,12 @@
  * stored timestamps, so a restart cannot lose or distort the clock.
  */
 import { randomBytes } from 'node:crypto';
-import type { Game } from '@prisma/client';
-import { type GameConfig, defaultConfigFromEnv, gameConfigSchema, phaseRules } from '@wcc/shared';
+import { Prisma, type Game, type GameEventType, type GameState } from '@prisma/client';
+import { type GameConfig, defaultConfigFromEnv, gameConfigSchema } from '@wcc/shared';
 import type { DB } from '../lib/prisma';
 import { AppError, conflict } from '../lib/errors';
 import { randomToken, sha256 } from '../lib/security';
-import { gameRules, refreshScore } from './wallet';
+import { refreshScore } from './wallet';
 import { createEvent } from './feed';
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -198,24 +198,99 @@ export async function resetRound(db: DB, gameId: string): Promise<{ result: Game
   });
 }
 
+const FINAL_MINUTE_MS = 60_000; // the FINAL_MINUTE window (last 60 s of play)
+
 /**
- * Auto-advance: called by the timer pulse. Returns events to broadcast when a
- * phase changed. Only makes transitions the clock demands — never reverses.
+ * Idempotent, concurrency-safe single phase transition.
+ *
+ * `updateMany` with a state predicate is an atomic conditional claim: exactly
+ * one writer flips the row, and every later/repeated/late call sees count 0
+ * and does nothing. This is what makes repeated `advancePhaseIfNeeded` pulses
+ * safe — no duplicate transitions and no duplicate events. The state change
+ * and its GameEvent commit together in one transaction.
+ */
+async function claimTransition(
+  db: DB,
+  game: { id: string },
+  fromStates: GameState[],
+  toState: GameState,
+  eventType: GameEventType,
+  extraData: Prisma.GameUpdateManyMutationInput = {},
+): Promise<Awaited<ReturnType<typeof createEvent>> | null> {
+  return db.$transaction(async (tx) => {
+    const claimed = await tx.game.updateMany({
+      where: { id: game.id, state: { in: fromStates } },
+      data: { ...extraData, state: toState },
+    });
+    if (claimed.count !== 1) return null;
+    return createEvent(tx, game, eventType, {});
+  });
+}
+
+/** Recompute every team's persisted score from its stored inputs (idempotent). */
+async function recomputeAllScores(db: DB, gameId: string, config: GameConfig): Promise<void> {
+  const teams = await db.team.findMany({ where: { gameId }, select: { id: true } });
+  for (const team of teams) {
+    await refreshScore(db, config, team.id);
+  }
+}
+
+/**
+ * Auto-advance: called by the single authoritative timer pulse. Returns the
+ * events to broadcast when phases changed. Drives the persisted lifecycle
+ * forward as the wall clock crosses each boundary:
+ *
+ *   MARKET_OPEN → FINAL_MINUTE (≤60 s remain)
+ *   MARKET_OPEN|FINAL_MINUTE → MARKET_CLOSED (deadline passes)
+ *   MARKET_CLOSED → FINAL_SCORING (after finalScoringDelaySeconds)
+ *   FINAL_SCORING → COMPLETED (after scoringDurationSeconds) + final score recompute
+ *
+ * It only ever moves forward, is idempotent under repeated calls, refuses to
+ * run while paused, and derives everything from stored timestamps so a server
+ * restart or reconnect cannot distort the clock. LOBBY is only left by the
+ * host (startGame); the timer never starts a game by itself.
  */
 export async function advancePhaseIfNeeded(db: DB, gameId: string, now = new Date()): Promise<Awaited<ReturnType<typeof createEvent>>[]> {
   const game = await db.game.findUnique({ where: { id: gameId } });
   if (!game || game.pausedAt) return [];
   const config = game.config as GameConfig;
-  if (game.state === 'MARKET_OPEN' || game.state === 'FINAL_MINUTE') {
-    const rules = phaseRules(
-      { state: game.state, pausedAt: null, startTime: game.startTime, endTime: game.endTime, phaseStartedAt: game.startTime },
-      gameRules(config),
-      now,
-    );
-    if (!rules.marketOpen && game.endTime && now.getTime() >= game.endTime.getTime()) {
-      const res = await closeMarket(db, gameId);
-      return res.events;
+  const endMs = game.endTime ? game.endTime.getTime() : null;
+  if (endMs === null) return []; // no clock yet (LOBBY)
+
+  const nowMs = now.getTime();
+  const scoringDelayMs = (config.finalScoringDelaySeconds ?? 10) * 1000;
+  const scoringDurationMs = (config.scoringDurationSeconds ?? 5) * 1000;
+  const events: Awaited<ReturnType<typeof createEvent>>[] = [];
+  const state = game.state;
+
+  // MARKET_OPEN → FINAL_MINUTE, exactly once, when ≤60 s remain.
+  if (state === 'MARKET_OPEN' && nowMs >= endMs - FINAL_MINUTE_MS) {
+    const ev = await claimTransition(db, game, ['MARKET_OPEN'], 'FINAL_MINUTE', 'FINAL_MINUTE');
+    if (ev) events.push(ev);
+  }
+
+  // MARKET_OPEN | FINAL_MINUTE → MARKET_CLOSED, exactly once, when the deadline passes.
+  if ((state === 'MARKET_OPEN' || state === 'FINAL_MINUTE') && nowMs >= endMs) {
+    const ev = await claimTransition(db, game, ['MARKET_OPEN', 'FINAL_MINUTE'], 'MARKET_CLOSED', 'MARKET_CLOSED', {
+      endTime: now,
+    });
+    if (ev) events.push(ev);
+  }
+
+  // MARKET_CLOSED → FINAL_SCORING after the configured delay.
+  if (state === 'MARKET_CLOSED' && nowMs >= endMs + scoringDelayMs) {
+    const ev = await claimTransition(db, game, ['MARKET_CLOSED'], 'FINAL_SCORING', 'FINAL_SCORING');
+    if (ev) events.push(ev);
+  }
+
+  // FINAL_SCORING → COMPLETED once the scoring window elapses; recompute scores first.
+  if (state === 'FINAL_SCORING' && nowMs >= endMs + scoringDelayMs + scoringDurationMs) {
+    const ev = await claimTransition(db, game, ['FINAL_SCORING'], 'COMPLETED', 'GAME_COMPLETED');
+    if (ev) {
+      await recomputeAllScores(db, gameId, config);
+      events.push(ev);
     }
   }
-  return [];
+
+  return events;
 }

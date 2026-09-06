@@ -24,6 +24,10 @@ export function activityMessage(type: GameEventType, ctx: ActivityCtx): string {
       return 'Market opened.';
     case 'MARKET_CLOSED':
       return 'Market closed. Trading is over.';
+    case 'FINAL_MINUTE':
+      return 'Final minute — the market closes soon!';
+    case 'FINAL_SCORING':
+      return 'The market is closed. Final scores are being calculated.';
     case 'GAME_COMPLETED':
       return 'Final scores have been calculated.';
     case 'TEAM_JOINED':

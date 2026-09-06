@@ -54,31 +54,31 @@ hostRouter.get('/state', h(async (req: AuthedRequest, res: Response) => {
 
 hostRouter.post('/start', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { result, events } = await startGame(DB, req.game.id);
-  req.app.get('io')?.emitGameEvents(events);
+  req.app.get('io')?.emitGameEvents(req.game.code, events);
   res.json({ game: result, events });
 }));
 
 hostRouter.post('/pause', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { result, events } = await pauseGame(DB, req.game.id);
-  req.app.get('io')?.emitGameEvents(events);
+  req.app.get('io')?.emitGameEvents(req.game.code, events);
   res.json({ game: result, events });
 }));
 
 hostRouter.post('/resume', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { result, events } = await resumeGame(DB, req.game.id);
-  req.app.get('io')?.emitGameEvents(events);
+  req.app.get('io')?.emitGameEvents(req.game.code, events);
   res.json({ game: result, events });
 }));
 
 hostRouter.post('/close-market', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { result, events } = await closeMarket(DB, req.game.id);
-  req.app.get('io')?.emitGameEvents(events);
+  req.app.get('io')?.emitGameEvents(req.game.code, events);
   res.json({ game: result, events });
 }));
 
 hostRouter.post('/finalize', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { result, events } = await finalizeGame(DB, req.game.id);
-  req.app.get('io')?.emitGameEvents(events);
+  req.app.get('io')?.emitGameEvents(req.game.code, events);
   res.json({ game: result, events });
 }));
 
@@ -86,7 +86,7 @@ hostRouter.post('/reset', actionLimiter, h(async (req: AuthedRequest, res: Respo
   const { reason } = req.body as { reason?: string };
   const { result } = await resetRound(DB, req.game.id);
   await import('../domain/feed').then(({ auditAction }) => auditAction(DB, req.game, 'ROUND_RESET', { reason: reason ?? null }));
-  req.app.get('io')?.emitGameEvents([{ type: 'GAME_RELOAD', t: Date.now() }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'GAME_RELOAD', t: Date.now() }]);
   res.json({ game: result });
 }));
 
@@ -97,13 +97,13 @@ hostRouter.get('/teams', h(async (req: AuthedRequest, res: Response) => {
 hostRouter.post('/teams/:id/disqualify', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { reason } = req.body as { reason?: string };
   const team = await disqualifyTeam(DB, req.game, param(req, 'id'), reason);
-  req.app.get('io')?.emitGameEvents([{ type: 'TEAM_DISQUALIFIED', t: Date.now() }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'TEAM_DISQUALIFIED', t: Date.now() }]);
   res.json(team);
 }));
 
 hostRouter.post('/teams/:id/reinstate', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const team = await reinstateTeam(DB, req.game, param(req, 'id'));
-  req.app.get('io')?.emitGameEvents([{ type: 'TEAM_JOINED', t: Date.now() }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'TEAM_JOINED', t: Date.now() }]);
   res.json(team);
 }));
 
@@ -113,13 +113,13 @@ hostRouter.get('/questions', h(async (req: AuthedRequest, res: Response) => {
 
 hostRouter.post('/questions', actionLimiter, validate(questionUpsertSchema), h(async (req: AuthedRequest, res: Response) => {
   const q = await createQuestion(DB, req.game, req.body);
-  req.app.get('io')?.emitGameEvents([{ type: 'QUESTION_ADDED', t: Date.now(), questionCode: q.code }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'QUESTION_ADDED', t: Date.now(), questionCode: q.code }]);
   res.status(201).json(q);
 }));
 
 hostRouter.patch('/questions/:id', actionLimiter, validate(questionUpsertSchema.partial()), h(async (req: AuthedRequest, res: Response) => {
   const q = await updateQuestion(DB, req.game, param(req, 'id'), req.body);
-  req.app.get('io')?.emitGameEvents([{ type: 'QUESTION_ADDED', t: Date.now(), questionCode: q.code }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'QUESTION_ADDED', t: Date.now(), questionCode: q.code }]);
   res.json(q);
 }));
 
@@ -131,14 +131,14 @@ hostRouter.delete('/questions/:id', actionLimiter, h(async (req: AuthedRequest, 
 hostRouter.patch('/questions/:id/enabled', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { enabled } = req.body as { enabled: boolean };
   const q = await toggleEnabled(DB, req.game, param(req, 'id'), enabled);
-  req.app.get('io')?.emitGameEvents([{ type: enabled ? 'QUESTION_ENABLED' : 'QUESTION_DISABLED', t: Date.now(), questionCode: q.code }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: enabled ? 'QUESTION_ENABLED' : 'QUESTION_DISABLED', t: Date.now(), questionCode: q.code }]);
   res.json(q);
 }));
 
 hostRouter.post('/questions/import', actionLimiter, validate(questionImportSchema), h(async (req: AuthedRequest, res: Response) => {
   const { questions } = req.body as { questions: object[] };
   const result = await importQuestions(DB, req.game, questions);
-  req.app.get('io')?.emitGameEvents([{ type: 'QUESTION_ADDED', t: Date.now() }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'QUESTION_ADDED', t: Date.now() }]);
   res.json(result);
 }));
 
@@ -151,28 +151,28 @@ hostRouter.get('/questions/export', h(async (req: AuthedRequest, res: Response) 
 hostRouter.post('/coins/adjust', actionLimiter, validate(adminAdjustSchema), h(async (req: AuthedRequest, res: Response) => {
   const { teamId, amount, reason } = req.body as { teamId: string; amount: number; reason: string };
   const result = await adjustCoins(DB, req.game, teamId, amount, reason);
-  req.app.get('io')?.emitGameEvents([{ type: 'SCORE_UPDATED', t: Date.now() }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'SCORE_UPDATED', t: Date.now() }]);
   res.json(result);
 }));
 
 hostRouter.post('/purchases/refund', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { teamId, questionId, reason } = req.body as { teamId: string; questionId: string; reason: string };
   await refundPurchase(DB, req.game, teamId, questionId, reason);
-  req.app.get('io')?.emitGameEvents([{ type: 'SCORE_UPDATED', t: Date.now() }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'SCORE_UPDATED', t: Date.now() }]);
   res.json({ ok: true });
 }));
 
 hostRouter.post('/trades/:id/cancel', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { reason } = req.body as { reason: string };
   await cancelTradeAdmin(DB, req.game, param(req, 'id'), reason);
-  req.app.get('io')?.emitGameEvents([{ type: 'TRADE_CANCELLED', t: Date.now() }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'TRADE_CANCELLED', t: Date.now() }]);
   res.json({ ok: true });
 }));
 
 hostRouter.post('/announcements', actionLimiter, validate(announcementSchema), h(async (req: AuthedRequest, res: Response) => {
   const { message } = req.body as { message: string };
   const a = await createAnnouncement(DB, req.game, message);
-  req.app.get('io')?.emitGameEvents([{ type: 'ANNOUNCEMENT_CREATED', t: Date.now(), message: a.message }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'ANNOUNCEMENT_CREATED', t: Date.now(), message: a.message }]);
   res.json(a);
 }));
 
@@ -183,7 +183,7 @@ hostRouter.patch('/config', actionLimiter, validate(configUpdateSchema), h(async
 
 hostRouter.post('/force-close', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   await forceCloseMarket(DB, req.game);
-  req.app.get('io')?.emitGameEvents([{ type: 'MARKET_CLOSED', t: Date.now() }]);
+  req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'MARKET_CLOSED', t: Date.now() }]);
   res.json({ ok: true });
 }));
 

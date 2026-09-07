@@ -96,7 +96,7 @@ export const router = createBrowserRouter([
       { path: 'inventory', element: <TeamInventory /> },
       { path: 'trades', element: <TeamTrades /> },
       { path: 'leaderboard', element: <TeamLeaderboard /> },
-      { path: 'solve/:ownershipId', element: <TeamSolve /> },
+      { path: 'solve/:questionId', element: <TeamSolve /> },
     ],
   },
   {

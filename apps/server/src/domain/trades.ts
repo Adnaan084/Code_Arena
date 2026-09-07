@@ -7,13 +7,13 @@
  * never exist under two teams) plus the coin pot, commits, and the losing
  * accept — even one racing simultaneously — sees count 0 and fails safely.
  */
-import type { Game, Question, QuestionOwnership, Trade } from '@prisma/client';
-import { type GameConfig, phaseRules } from '@wcc/shared';
+import type { Game, Question, QuestionOwnership } from '@prisma/client';
+import { type GameConfig, type TradeTarget, phaseRules, toQuestionPublic } from '@wcc/shared';
 import type { DB, Tx } from '../lib/prisma';
 import { AppError, conflict, forbidden, isPrismaUniqueViolation, notFound } from '../lib/errors';
 import { gameRules, changeCoins, refreshScore } from './wallet';
 import { createEvent } from './feed';
-import { toTradeDto, type TradeWithRelations } from './serializers';
+import { toTradeDto, asRecord, type TradeWithRelations } from './serializers';
 
 const tradeStateError = (m: string) => new AppError(409, 'TRADE_STATE', m);
 
@@ -277,4 +277,39 @@ export async function listTrades(db: DB, game: Game, teamId: string) {
     include: tradeWithRelations,
   });
   return (trades as unknown as TradeWithRelations[]).map((t) => toTradeDto(t, teamId));
+}
+
+/**
+ * Read-only: every ACTIVE team a client could trade with, plus the questions
+ * it can currently give up (owned, UNSOLVED, not tied up in a pending trade,
+ * under its max trades). Feeds the propose-trade picker; the server remains
+ * authoritative on everything at propose time.
+ */
+export async function listTradeTargets(db: DB, game: Game, myTeamId: string): Promise<TradeTarget[]> {
+  const teams = await db.team.findMany({
+    where: { gameId: game.id, status: 'ACTIVE', NOT: { id: myTeamId } },
+    orderBy: { joinOrder: 'asc' },
+    select: { id: true, name: true },
+  });
+  if (teams.length === 0) return [];
+
+  const ownerships = await db.questionOwnership.findMany({
+    where: {
+      gameId: game.id,
+      teamId: { in: teams.map((t) => t.id) },
+      status: 'UNSOLVED',
+      tradeLock: false,
+    },
+    include: { question: true },
+  });
+
+  const byTeam = new Map<string, TradeTarget['tradable']>();
+  for (const o of ownerships) {
+    if (o.question.tradeCount >= o.question.maxTrades) continue;
+    const list = byTeam.get(o.teamId) ?? [];
+    list.push(toQuestionPublic(asRecord(o.question)));
+    byTeam.set(o.teamId, list);
+  }
+
+  return teams.map((t) => ({ teamId: t.id, teamName: t.name, tradable: byTeam.get(t.id) ?? [] }));
 }

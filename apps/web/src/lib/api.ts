@@ -12,6 +12,7 @@ import type {
   TeamGameState,
   TeamSummary,
   TradeDto,
+  TradeTarget,
   TransactionDto,
 } from '@wcc/shared';
 
@@ -161,6 +162,8 @@ export const api = {
     }),
 
   teamTrades: (token: string) => request<TradeDto[]>('/api/team/trades', { token }),
+
+  teamTradeTargets: (token: string) => request<TradeTarget[]>('/api/team/trades/targets', { token }),
 
   createTrade: (
     token: string,

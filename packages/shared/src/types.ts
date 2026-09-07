@@ -225,12 +225,22 @@ export interface ActivityDto {
 
 export interface LeaderboardRow {
   rank: number;
+  /** Team id — lets a team client target another team for trades. */
+  id: string;
   teamName: string;
   score: number;
   coins: number;
   solved: number;
   purchased: number;
   trades: number;
+}
+
+/** One team a team client can trade with, with the questions it can give up. */
+export interface TradeTarget {
+  teamId: string;
+  teamName: string;
+  /** Owned, UNSOLVED, not trade-locked, under maxTrades. */
+  tradable: QuestionPublic[];
 }
 
 export interface AnnouncementDto {

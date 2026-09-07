@@ -45,6 +45,14 @@ export const DIFFICULTY_TONE: Record<Difficulty, string> = {
   EXTREME: 'bg-violet-500/15 text-violet-300 border-violet-500/30',
 };
 
+/** Difficulty → Badge tone (typed, so Badge gets a real tone, not a class string). */
+export const DIFFICULTY_BADGE_TONE: Record<Difficulty, 'muted' | 'info' | 'positive' | 'warn' | 'negative' | 'viol'> = {
+  EASY: 'positive',
+  MEDIUM: 'warn',
+  HARD: 'negative',
+  EXTREME: 'viol',
+};
+
 export const QUESTION_TYPE_LABEL: Record<QuestionType, string> = {
   MULTIPLE_CHOICE: 'Multiple choice',
   OUTPUT_PREDICTION: 'Predict output',

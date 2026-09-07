@@ -7,7 +7,7 @@ import { requireAuth, requireTeam, type AuthedRequest } from '../auth/guard';
 import { unauthorized } from '../lib/errors';
 import { listMarketplace, purchaseQuestion, listOwnedQuestions } from '../domain/market';
 import { submitAnswer } from '../domain/solve';
-import { listTrades, proposeTrade, acceptTrade, rejectTrade, cancelTrade } from '../domain/trades';
+import { listTrades, proposeTrade, acceptTrade, rejectTrade, cancelTrade, listTradeTargets } from '../domain/trades';
 import { toTeamSummary, currentSeq, toGameMeta } from '../domain/serializers';
 import { getLeaderboard, getTransactions, getActivity } from '../domain/admin';
 import {
@@ -48,9 +48,10 @@ teamRouter.get('/state', h(async (req: AuthedRequest, res: Response) => {
   if (!identity) throw unauthorized('Session invalid');
 
   const maxAttempts = (game.config as { maxAttempts?: number }).maxAttempts ?? 1;
-  const [marketplace, inventory, transactions, leaderboard, activity, seq] = await Promise.all([
+  const [marketplace, inventory, trades, transactions, leaderboard, activity, seq] = await Promise.all([
     listMarketplace(DB, game, team.id, {}),
     listOwnedQuestions(DB, game, team.id, maxAttempts),
+    listTrades(DB, game, team.id),
     getTransactions(DB, game, team.id),
     getLeaderboard(DB, game),
     getActivity(DB, game),
@@ -62,6 +63,7 @@ teamRouter.get('/state', h(async (req: AuthedRequest, res: Response) => {
     team: toTeamSummary(identity),
     marketplace,
     inventory,
+    trades,
     transactions,
     leaderboard,
     activity,
@@ -99,6 +101,11 @@ teamRouter.post('/questions/:qid/submit', actionLimiter, validate(submitSchema),
 teamRouter.get('/trades', h(async (req: AuthedRequest, res: Response) => {
   const trades = await listTrades(DB, req.game, req.team!.id);
   res.json(trades);
+}));
+
+teamRouter.get('/trades/targets', h(async (req: AuthedRequest, res: Response) => {
+  const targets = await listTradeTargets(DB, req.game, req.team!.id);
+  res.json(targets);
 }));
 
 teamRouter.post('/trades', actionLimiter, validate(createTradeSchema), h(async (req: AuthedRequest, res: Response) => {

@@ -1,24 +1,18 @@
-import { FileQuestion, CheckCircle2, XCircle, Scale, ArrowRight } from 'lucide-react';
+import { CheckCircle2, XCircle, Scale } from 'lucide-react';
 import { Card, CardBody, Badge, Button, EmptyState, Tabs, TabList, Tab, TabPanels, TabPanel } from '../../components/ui';
+import { ProposeTradeModal } from '../../components/trade/ProposeTradeModal';
 import { useTeamStore } from '../../stores/team';
-import { api } from '../../lib/api';
-import { useAuthStore } from '../../stores/auth';
-import { toast } from '../../stores/toasts';
-import { friendlyError } from '../../lib/errorMessages';
-import { newIdempotencyKey } from '../../lib/api';
-import { formatCoins, DIFFICULTY_TONE, QUESTION_TYPE_LABEL } from '../../lib/format';
+import { formatCoins, DIFFICULTY_BADGE_TONE, QUESTION_TYPE_LABEL } from '../../lib/format';
 import { useNavigate } from 'react-router-dom';
 
 type Filter = 'ALL' | 'UNSOLVED' | 'SOLVED' | 'FAILED' | 'TRADABLE';
 
 /** Inventory with tabs for each ownership status. */
 export function TeamInventory() {
-  const { teamToken } = useAuthStore();
   const inventory = useTeamStore((s) => s.inventory);
-  const meta = useTeamStore((s) => s.meta);
   const navigate = useNavigate();
   const [filter, setFilter] = useState<Filter>('ALL');
-  const [trading, setTrading] = useState<string | null>(null);
+  const [tradeOffer, setTradeOffer] = useState<typeof inventory[0] | null>(null);
 
   const filtered = inventory.filter((item) => {
     if (filter === 'ALL') return true;
@@ -34,16 +28,9 @@ export function TeamInventory() {
     TRADABLE: inventory.filter((i) => i.status === 'UNSOLVED' && i.question.maxTrades > i.question.tradeCount).length,
   };
 
-  const handleTrade = async (item: typeof inventory[0]) => {
-    setTrading(item.ownershipId);
-    try {
-      await api.purchaseQuestion(teamToken ?? '', item.ownershipId, newIdempotencyKey());
-    } catch {
-      // handled by navigate
-    }
-  };
+  const openTrade = (item: typeof inventory[0]) => setTradeOffer(item);
 
-  const handleSolve = (ownershipId: string) => navigate(`/team/solve/${ownershipId}`);
+  const handleSolve = (questionId: string) => navigate(`/team/solve/${questionId}`);
 
   return (
     <div className="space-y-3">
@@ -57,26 +44,30 @@ export function TeamInventory() {
               </Tab>
             ))}
           </TabList>
+
+          <TabPanels value={filter}>
+            <TabPanel value="ALL">
+              <InventoryList items={filtered} onSolve={handleSolve} onTrade={openTrade} />
+            </TabPanel>
+            <TabPanel value="UNSOLVED">
+              <InventoryList items={filtered} onSolve={handleSolve} onTrade={openTrade} />
+            </TabPanel>
+            <TabPanel value="SOLVED">
+              <InventoryList items={filtered} onSolve={handleSolve} onTrade={openTrade} />
+            </TabPanel>
+            <TabPanel value="FAILED">
+              <InventoryList items={filtered} onSolve={handleSolve} onTrade={openTrade} />
+            </TabPanel>
+            <TabPanel value="TRADABLE">
+              <InventoryList items={filtered} onSolve={handleSolve} onTrade={openTrade} />
+            </TabPanel>
+          </TabPanels>
         </Tabs>
       </div>
 
-      <TabPanels value={filter}>
-        <TabPanel value="ALL">
-          <InventoryList items={filtered} onSolve={handleSolve} onTrade={handleTrade} trading={trading} />
-        </TabPanel>
-        <TabPanel value="UNSOLVED">
-          <InventoryList items={filtered} onSolve={handleSolve} onTrade={handleTrade} trading={trading} />
-        </TabPanel>
-        <TabPanel value="SOLVED">
-          <InventoryList items={filtered} onSolve={handleSolve} onTrade={handleTrade} trading={trading} />
-        </TabPanel>
-        <TabPanel value="FAILED">
-          <InventoryList items={filtered} onSolve={handleSolve} onTrade={handleTrade} trading={trading} />
-        </TabPanel>
-        <TabPanel value="TRADABLE">
-          <InventoryList items={filtered} onSolve={handleSolve} onTrade={handleTrade} trading={trading} />
-        </TabPanel>
-      </TabPanels>
+      {tradeOffer && (
+        <ProposeTradeModal open onClose={() => setTradeOffer(null)} offered={tradeOffer} />
+      )}
     </div>
   );
 }
@@ -85,12 +76,10 @@ function InventoryList({
   items,
   onSolve,
   onTrade,
-  trading,
 }: {
   items: ReturnType<typeof import('../../stores/team').useTeamStore.getState>['inventory'];
   onSolve: (id: string) => void;
   onTrade: (item: typeof items[0]) => void;
-  trading: string | null;
 }) {
   if (items.length === 0) {
     return <EmptyState title="Nothing here" body="No questions match the current filter." />;
@@ -104,7 +93,7 @@ function InventoryList({
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-1.5">
-                  <Badge tone={DIFFICULTY_TONE[item.question.difficulty] as any}>{item.question.difficulty}</Badge>
+                  <Badge tone={DIFFICULTY_BADGE_TONE[item.question.difficulty]}>{item.question.difficulty}</Badge>
                   <span className="font-mono text-xs font-bold text-fg">{item.question.code}</span>
                   <Badge
                     tone={
@@ -145,7 +134,7 @@ function InventoryList({
                     <Button
                       variant="primary"
                       size="sm"
-                      onClick={() => onSolve(item.ownershipId)}
+                      onClick={() => onSolve(item.question.id)}
                       className="h-9 px-3"
                     >
                       <CheckCircle2 className="size-3.5" />
@@ -156,8 +145,6 @@ function InventoryList({
                         variant="ghost"
                         size="sm"
                         onClick={() => onTrade(item)}
-                        disabled={trading === item.ownershipId}
-                        loading={trading === item.ownershipId}
                         className="h-9 px-3"
                       >
                         <Scale className="size-3.5" />

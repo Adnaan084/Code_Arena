@@ -60,6 +60,8 @@ const asRecord = (q: Question): QuestionRecordLike =>
     maxTrades: q.maxTrades,
   }) as QuestionRecordLike;
 
+export { asRecord };
+
 export function toGameMeta(
   game: Pick<
     Game,
@@ -134,13 +136,14 @@ export function toTeamSummary(
 }
 
 export function toLeaderboard(
-  teams: Pick<Team, 'name' | 'score' | 'coins' | 'solvedCount' | 'purchasedCount' | 'tradeCount' | 'status'>[],
+  teams: Pick<Team, 'id' | 'name' | 'score' | 'coins' | 'solvedCount' | 'purchasedCount' | 'tradeCount' | 'status'>[],
   opts: { excludeDisqualified?: boolean } = { excludeDisqualified: true },
 ): LeaderboardRow[] {
   const filtered = opts.excludeDisqualified ? teams.filter((t) => t.status === 'ACTIVE') : teams;
   const sorted = [...filtered].sort((a, b) => b.score - a.score || b.coins - a.coins || a.name.localeCompare(b.name));
   return sorted.map((t, i) => ({
     rank: i + 1,
+    id: t.id,
     teamName: t.name,
     score: t.score,
     coins: t.coins,

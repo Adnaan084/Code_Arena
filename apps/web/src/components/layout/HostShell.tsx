@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
-import { NavLink, Outlet } from 'react-router-dom';
-import { Coins, FileQuestion, Scale, Sprout, Trophy, Users, Settings, Activity, ListX } from 'lucide-react';
+import { NavLink, Outlet, Link } from 'react-router-dom';
+import { Coins, FileQuestion, Scale, Sprout, Trophy, Users, Settings, Activity, ListX, KeyRound } from 'lucide-react';
 import { useAuthStore } from '../../stores/auth';
 import { useHostStore } from '../../stores/host';
 import { useServerPhase, useServerRemainingMs } from '../../stores/clock';
@@ -9,6 +9,7 @@ import { useGameSocket } from '../../hooks/useGameSocket';
 import { formatCoins } from '../../lib/format';
 import { ConnectionBadge } from '../ui/ConnectionBadge';
 import { PhaseBanner } from '../ui/PhaseBanner';
+import { Card, CardBody, Button } from '../ui';
 
 const SECTIONS = [
   { to: '/host', label: 'Console', icon: ListX, admin: false },
@@ -36,6 +37,34 @@ export function HostShell({ children }: { children?: ReactNode }) {
   const connected = useHostStore((s) => s.connectedCount);
 
   const displayPhase = phase ?? meta?.state ?? null;
+
+  // No host session (never created a game, or credentials were cleared): a host
+  // token is shown exactly once at creation and cannot be recovered, so the
+  // only path here is to create a new game. Authoritative state is never stored
+  // anywhere local — it returns only when a live socket delivers state:sync.
+  if (!gameCode || !hostToken) {
+    return (
+      <div className="flex min-h-full w-full items-center justify-center p-6">
+        <Card className="w-full max-w-md">
+          <CardBody className="pt-4 text-center">
+            <KeyRound className="mx-auto size-10 text-warn" aria-hidden />
+            <h1 className="mt-3 text-lg font-bold text-fg">NO HOST SESSION</h1>
+            <p className="mt-2 text-sm text-fg-muted">
+              The host token is shown only once when a game is created and cannot be recovered.
+              Open the host console by creating a new game.
+            </p>
+            <div className="mt-4">
+              <Link to="/create" className="w-full">
+                <Button variant="primary" size="lg" full>
+                  CREATE HOST GAME
+                </Button>
+              </Link>
+            </div>
+          </CardBody>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-full w-full">

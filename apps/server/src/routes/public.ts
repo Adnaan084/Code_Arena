@@ -37,6 +37,10 @@ publicRouter.post('/games/:code/teams/join', joinLimiter, validate(joinTeamSchem
   if (!game) throw notFound('Game not found.');
   const { teamName, player1, player2 } = req.body as { teamName: string; player1: string; player2?: string };
   const { teamId, teamName: name, teamAccessToken } = await joinGame(DB, game, { teamName, player1, player2 });
+  // Broadcast the join so live observers (host dashboard, projector, other
+  // teams) re-sync authoritative state immediately. A team registering IS a
+  // game state change and must reach the host room over the existing protocol.
+  req.app.get('io')?.emitGameEvents(game.code, [{ type: 'TEAM_JOINED', t: Date.now() }]);
   return res.json({ teamId, teamName: name, teamAccessToken });
 });
 

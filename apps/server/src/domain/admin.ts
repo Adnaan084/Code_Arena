@@ -9,10 +9,20 @@ import { AppError, conflict, notFound } from '../lib/errors';
 import { gameRules, changeCoins, refreshScore } from './wallet';
 import { auditAction } from './feed';
 import { createEvent } from './feed';
-import { toTeamSummary, toLeaderboard, toActivity } from './serializers';
+import { toTeamSummary, toLeaderboard, toActivity, toHostPurchase } from './serializers';
 
 export async function listTeams(db: DB, game: Game) {
   return (await db.team.findMany({ where: { gameId: game.id }, orderBy: { joinOrder: 'asc' } })).map(toTeamSummary);
+}
+
+/** Every owned question across all teams — the host refund surface. */
+export async function listPurchases(db: DB, game: Game) {
+  const rows = await db.questionOwnership.findMany({
+    where: { gameId: game.id },
+    include: { question: { select: { code: true, title: true } }, team: { select: { name: true } } },
+    orderBy: { purchasedAt: 'desc' },
+  });
+  return rows.map(toHostPurchase);
 }
 
 export async function disqualifyTeam(db: DB, game: Game, teamId: string, reason?: string) {

@@ -7,7 +7,7 @@ import { sha256 } from '../auth/tokens';
 import { toGameMeta, toLeaderboard, currentSeq, toActivity, toTeamSummary, toMarketItem, toTradeDto, toInventoryItem, toAuditLogEntry } from '../domain/serializers';
 import { advancePhaseIfNeeded } from '../domain/games';
 import { listQuestions } from '../domain/questions';
-import { getTransactions, getAuditLog } from '../domain/admin';
+import { getTransactions, getAuditLog, listPurchases } from '../domain/admin';
 import { expireStaleTrades } from '../domain/trades';
 import { effectiveState, phaseRules, type RuleConfig } from '@wcc/shared';
 
@@ -168,12 +168,14 @@ export function createSocketServer(app: Express, http: HttpServer) {
     const isHost = game.hostTokenHash === hash;
     if (isHost) {
       // Host dashboard gets the full role-shaped snapshot: teams plus the
-      // question bank, transaction ledger and audit trail it renders.
-      const [teams, questions, transactions, audit] = await Promise.all([
+      // question bank, transaction ledger, audit trail and the cross-team
+      // purchase surface it renders (refund administration reads these).
+      const [teams, questions, transactions, audit, purchases] = await Promise.all([
         prisma.team.findMany({ where: { gameId: game.id }, orderBy: { joinOrder: 'asc' } }).then((rows) => rows.map(toTeamSummary)),
         listQuestions(prisma, game),
         getTransactions(prisma, game),
         getAuditLog(prisma, game),
+        listPurchases(prisma, game),
       ]);
       sock.emit('state:sync', {
         meta,
@@ -182,6 +184,7 @@ export function createSocketServer(app: Express, http: HttpServer) {
         activity,
         transactions,
         audit: audit.map(toAuditLogEntry),
+        purchases,
         leaderboard: lb,
         lastEventSeq: seq,
       });

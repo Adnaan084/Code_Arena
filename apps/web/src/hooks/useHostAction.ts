@@ -6,9 +6,9 @@ import { friendlyError } from '../lib/errorMessages';
 import { useAuthStore } from '../stores/auth';
 
 /**
- * Small reusable abstraction for host lifecycle/console actions.
+ * Reusable abstraction for host console/administrative actions.
  *
- * Calls the real host REST endpoint via `api.hostAction(token, action)`, then
+ * Every action calls a real host REST endpoint via the typed API client, then
  * — and only then — asks the socket layer for a fresh authoritative snapshot.
  * The UI never assumes a click succeeded: state returns through the server.
  * Also guards against accidental double-clicks (one action at a time).
@@ -20,6 +20,11 @@ const ACTION_LABEL: Record<string, { done: string; fail: string }> = {
   'close-market': { done: 'Market closed', fail: 'close the market' },
   finalize: { done: 'Game finalized', fail: 'finalize the game' },
   reset: { done: 'Game reset', fail: 'reset the game' },
+  // H2-B team administration + economy.
+  disqualify: { done: 'Team disqualified', fail: 'disqualify the team' },
+  reinstate: { done: 'Team reinstated', fail: 'reinstate the team' },
+  'adjust-coins': { done: 'Coins adjusted', fail: 'adjust coins' },
+  refund: { done: 'Purchase refunded', fail: 'refund the purchase' },
 };
 
 const FALLBACK_LABEL = { done: 'Action complete', fail: 'run that action' };
@@ -29,8 +34,9 @@ export function useHostAction() {
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [lastError, setLastError] = useState<{ code: string; message: string } | null>(null);
 
-  const run = useCallback(
-    async (action: string): Promise<{ ok: boolean; data: unknown }> => {
+  /** Shared execution: guard session + double-click, run the call, then resync. */
+  const execute = useCallback(
+    async (action: string, call: () => Promise<unknown>): Promise<{ ok: boolean; data: unknown }> => {
       if (!hostToken) {
         const err = { code: 'NO_SESSION', message: 'No host session. Please create a game.' };
         setLastError(err);
@@ -44,7 +50,7 @@ export function useHostAction() {
       setBusyAction(action);
       setLastError(null);
       try {
-        const data = await api.hostAction(hostToken, action);
+        const data = await call();
         toast.success(label.done);
         // Returning authoritative state, not a local guess: requestState pulls a
         // full state:sync over the live socket; the event that the backend also
@@ -63,12 +69,49 @@ export function useHostAction() {
     [hostToken, busyAction],
   );
 
+  /** Lifecycle action → POST /host/{action} (start, pause, resume, …). */
+  const run = useCallback(
+    (action: string) => execute(action, () => api.hostAction(hostToken!, action)),
+    [execute, hostToken],
+  );
+
+  /** Disqualify a team (reason optional). */
+  const disqualify = useCallback(
+    (teamId: string, reason?: string) =>
+      execute('disqualify', () => api.hostDisqualify(hostToken!, teamId, reason)),
+    [execute, hostToken],
+  );
+
+  /** Reinstate a previously-disqualified team. */
+  const reinstate = useCallback(
+    (teamId: string) => execute('reinstate', () => api.hostReinstate(hostToken!, teamId)),
+    [execute, hostToken],
+  );
+
+  /** Adjust a team's coins by a signed amount (must be non-zero; backend authoritative for balance). */
+  const adjustCoins = useCallback(
+    (teamId: string, amount: number, reason: string) =>
+      execute('adjust-coins', () => api.hostAdjustCoins(hostToken!, teamId, amount, reason)),
+    [execute, hostToken],
+  );
+
+  /** Refund a purchase (teamId + questionId). */
+  const refund = useCallback(
+    (teamId: string, questionId: string, reason: string) =>
+      execute('refund', () => api.hostRefund(hostToken!, teamId, questionId, reason)),
+    [execute, hostToken],
+  );
+
   const clearError = useCallback(() => setLastError(null), []);
 
   return {
     run,
+    disqualify,
+    reinstate,
+    adjustCoins,
+    refund,
     busyAction,
-    /** True while ANY host lifecycle action is in flight. */
+    /** True while ANY host action is in flight. */
     isBusy: busyAction !== null,
     /** Narrow busy check for per-button loading spinners. */
     isBusyAction: (a: string) => busyAction === a,

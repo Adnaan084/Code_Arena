@@ -20,6 +20,7 @@ import { useAuthStore } from '../../stores/auth';
 import { useServerPhase, useServerPhaseRules } from '../../stores/clock';
 import { useRemainingTime } from '../../hooks/useRemainingTime';
 import { useHostAction } from '../../hooks/useHostAction';
+import { TeamAdmin } from './TeamAdmin';
 import { formatCoins, formatClock, formatTime, timeAgo } from '../../lib/format';
 import type { DisplayState } from '@wcc/shared';
 
@@ -324,6 +325,17 @@ export function HostConsole() {
           <Stat label="Fails" value={economy.fails} icon={<AlertTriangle className="size-3.5" />} accent="negative" />
           <Stat label="Trades" value={economy.trades} icon={<Scale className="size-3.5" />} accent="warn" />
         </div>
+      </div>
+
+      {/* ── H2-B team administration + economy controls ─────────────────── */}
+      <div>
+        <div className="mb-2 flex items-center justify-between gap-3">
+          <h3 className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-widest text-fg-muted">
+            <Users className="size-4" aria-hidden /> TEAM ADMINISTRATION
+          </h3>
+          <span className="text-[11px] text-fg-muted">disqualify · reinstate · coins · refund</span>
+        </div>
+        <TeamAdmin />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">

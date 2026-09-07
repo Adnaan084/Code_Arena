@@ -20,11 +20,13 @@ import {
   type AuditLogEntry,
   type GameConfig,
   type GameMeta,
+  type HostPurchase,
   type InventoryItem,
   type LeaderboardRow,
   type MarketItem,
   type PhaseRules,
   type QuestionAdmin,
+  type QuestionOwnershipStatus,
   type QuestionRecordLike,
   type TeamSummary,
   type TradeDto,
@@ -180,6 +182,25 @@ export function toInventoryItem(o: QuestionOwnership & { question: Question }, m
     status: o.status,
     attemptsUsed: o.attemptsUsed,
     maxAttempts,
+    purchasedAt: o.purchasedAt.toISOString(),
+  };
+}
+
+/** Ownership row → host refund surface (team + question + price + state). */
+export function toHostPurchase(
+  o: Pick<QuestionOwnership, 'teamId' | 'questionId' | 'status' | 'purchasePrice' | 'purchasedAt'> & {
+    question: Pick<Question, 'code' | 'title'>;
+    team: { name: string };
+  },
+): HostPurchase {
+  return {
+    teamId: o.teamId,
+    teamName: o.team.name,
+    questionId: o.questionId,
+    questionCode: o.question.code,
+    title: o.question.title,
+    price: o.purchasePrice,
+    status: o.status as QuestionOwnershipStatus,
     purchasedAt: o.purchasedAt.toISOString(),
   };
 }

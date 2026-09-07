@@ -1229,3 +1229,262 @@ describe('host lifecycle routes (H2-A)', () => {
     expect(auditAfter.body[0].reason).toBe('round 2');
   });
 });
+
+// ─── H2-B: host team administration ──────────────────────────────────────
+describe('host team administration (H2-B)', () => {
+  it('disqualify: authenticated host can disqualify an ACTIVE team (audit + state)', async () => {
+    const g = await createGame('H2B Team');
+    const t = await joinTeam(g.gameCode, 'Booted', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+
+    const res = await request(bundle.app)
+      .post(`/api/host/teams/${t.teamId}/disqualify`)
+      .set(hostAuth(g.hostToken))
+      .send({ reason: 'rule violation' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ id: t.teamId, status: 'DISQUALIFIED' });
+
+    // State reflects the status; audit records the action + reason.
+    const st = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    const team = st.body.teams.find((x: { id: string }) => x.id === t.teamId);
+    expect(team.status).toBe('DISQUALIFIED');
+    const audit = await admin.auditLog.findFirst({ where: { gameId: st.body.meta.id, action: 'DISQUALIFY_TEAM' } });
+    expect(audit).not.toBeNull();
+    expect(audit!.reason).toBe('rule violation');
+  });
+
+  it('disqualify guards: non-host 403, invalid team 404, already-disqualified 409', async () => {
+    const g = await createGame('H2B TeamGuards');
+    const t = await joinTeam(g.gameCode, 'Guarded', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+
+    // A TEAM token is not a host → 403.
+    const nonHost = await request(bundle.app)
+      .post(`/api/host/teams/${t.teamId}/disqualify`)
+      .set(hostAuth(t.teamAccessToken))
+      .send({});
+    expect(nonHost.status).toBe(403);
+    expect(nonHost.body.error.code).toBe('FORBIDDEN');
+
+    // Unknown team id → 404.
+    const missing = await request(bundle.app)
+      .post(`/api/host/teams/${'00000000-0000-0000-0000-000000000000'}/disqualify`)
+      .set(hostAuth(g.hostToken))
+      .send({});
+    expect(missing.status).toBe(404);
+
+    // Already disqualified → 409.
+    await request(bundle.app).post(`/api/host/teams/${t.teamId}/disqualify`).set(hostAuth(g.hostToken)).send({});
+    const again = await request(bundle.app)
+      .post(`/api/host/teams/${t.teamId}/disqualify`)
+      .set(hostAuth(g.hostToken))
+      .send({});
+    expect(again.status).toBe(409);
+    expect(again.body.error.code).toBe('CONFLICT');
+  });
+
+  it('reinstate: authenticated host can reinstate a disqualified team (audit + state)', async () => {
+    const g = await createGame('H2B Reinstate');
+    const t = await joinTeam(g.gameCode, 'Returner', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+    await request(bundle.app).post(`/api/host/teams/${t.teamId}/disqualify`).set(hostAuth(g.hostToken)).send({});
+
+    const res = await request(bundle.app).post(`/api/host/teams/${t.teamId}/reinstate`).set(hostAuth(g.hostToken));
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ id: t.teamId, status: 'ACTIVE' });
+
+    const st = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    const team = st.body.teams.find((x: { id: string }) => x.id === t.teamId);
+    expect(team.status).toBe('ACTIVE');
+    const audit = await admin.auditLog.findFirst({ where: { gameId: st.body.meta.id, action: 'REINSTATE_TEAM' } });
+    expect(audit).not.toBeNull();
+  });
+
+  it('reinstate guards: invalid team 404, already-active reinstate is a harmless no-op', async () => {
+    const g = await createGame('H2B ReinstateGuards');
+    const t = await joinTeam(g.gameCode, 'ActiveAlready', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+
+    const missing = await request(bundle.app)
+      .post(`/api/host/teams/${'00000000-0000-0000-0000-000000000000'}/reinstate`)
+      .set(hostAuth(g.hostToken));
+    expect(missing.status).toBe(404);
+
+    // Reinstating a team that is already ACTIVE is idempotent (stays ACTIVE).
+    const ok = await request(bundle.app).post(`/api/host/teams/${t.teamId}/reinstate`).set(hostAuth(g.hostToken));
+    expect(ok.status).toBe(200);
+    expect(ok.body.status).toBe('ACTIVE');
+  });
+});
+
+// ─── H2-B: host economy administration ───────────────────────────────────
+describe('host economy administration (H2-B)', () => {
+  it('add coins: host adds coins; authoritative balance + ledger + audit', async () => {
+    const g = await createGame('H2B Add');
+    const t = await joinTeam(g.gameCode, 'Rich', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+
+    const res = await request(bundle.app)
+      .post('/api/host/coins/adjust')
+      .set(hostAuth(g.hostToken))
+      .send({ teamId: t.teamId, amount: 250, reason: 'tournament head start' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ balanceAfter: 1250, coins: 1250 });
+
+    const st = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    const team = st.body.teams.find((x: { id: string }) => x.id === t.teamId);
+    expect(team.coins).toBe(1250);
+
+    const txn = await admin.transaction.findFirst({ where: { gameId: st.body.meta.id, teamId: t.teamId, type: 'ADMIN_ADJUST' } });
+    expect(txn).not.toBeNull();
+    expect(txn!.amount).toBe(250);
+    expect(txn!.balanceAfter).toBe(1250);
+    const audit = await admin.auditLog.findFirst({ where: { gameId: st.body.meta.id, action: 'ADJUST_COINS' } });
+    expect(audit).not.toBeNull();
+    expect(audit!.reason).toBe('tournament head start');
+  });
+
+  it('remove coins: host removes coins; authoritative balance persists', async () => {
+    const g = await createGame('H2B Remove');
+    const t = await joinTeam(g.gameCode, 'Payer', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+
+    const res = await request(bundle.app)
+      .post('/api/host/coins/adjust')
+      .set(hostAuth(g.hostToken))
+      .send({ teamId: t.teamId, amount: -300, reason: 'entry fee correction' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ balanceAfter: 700, coins: 700 });
+
+    const st = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    const team = st.body.teams.find((x: { id: string }) => x.id === t.teamId);
+    expect(team.coins).toBe(700);
+  });
+
+  it('adjust coins guards: insufficient balance 409, invalid amount/reason 400, wallet untouched', async () => {
+    const g = await createGame('H2B CoinGuards');
+    const t = await joinTeam(g.gameCode, 'Broke', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+
+    // Remove more than the team has → 409 (adjustCoins guard), wallet unchanged.
+    const neg = await request(bundle.app)
+      .post('/api/host/coins/adjust')
+      .set(hostAuth(g.hostToken))
+      .send({ teamId: t.teamId, amount: -5000, reason: 'way too much' });
+    expect(neg.status).toBe(409);
+    expect(neg.body.error.code).toBe('CONFLICT');
+
+    // Zero amount → 400 VALIDATION_ERROR.
+    const zero = await request(bundle.app)
+      .post('/api/host/coins/adjust')
+      .set(hostAuth(g.hostToken))
+      .send({ teamId: t.teamId, amount: 0, reason: 'zero adjustment' });
+    expect(zero.status).toBe(400);
+    expect(zero.body.error.code).toBe('VALIDATION_ERROR');
+
+    // Non-integer amount → 400.
+    const frac = await request(bundle.app)
+      .post('/api/host/coins/adjust')
+      .set(hostAuth(g.hostToken))
+      .send({ teamId: t.teamId, amount: 12.5, reason: 'fractional' });
+    expect(frac.status).toBe(400);
+
+    // Reason too short → 400.
+    const shortReason = await request(bundle.app)
+      .post('/api/host/coins/adjust')
+      .set(hostAuth(g.hostToken))
+      .send({ teamId: t.teamId, amount: 1, reason: 'ab' });
+    expect(shortReason.status).toBe(400);
+
+    // Wallet was never touched by any rejected attempt.
+    const st = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    const team = st.body.teams.find((x: { id: string }) => x.id === t.teamId);
+    expect(team.coins).toBe(1000);
+  });
+
+  it('refund: host refunds a valid unsolved purchase; balance + state + audit', async () => {
+    const g = await createGame('H2B Refund');
+    const t = await joinTeam(g.gameCode, 'Refunder', 'Ada');
+    const q = await createQuestion(g.hostToken, question('RFD01'));
+    await startGame(g.gameCode, g.hostToken);
+
+    const buy = await request(bundle.app)
+      .post(`/api/team/questions/${q.id}/purchase`)
+      .set(hostAuth(t.teamAccessToken))
+      .send({ idempotencyKey: idem() });
+    expect(buy.status).toBe(200);
+    expect(buy.body.balanceAfter).toBe(900);
+
+    // The purchase is now visible on the host state (refund surface).
+    const stBefore = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    const purch = stBefore.body.purchases.find((p: { questionId: string }) => p.questionId === q.id);
+    expect(purch).toMatchObject({ teamId: t.teamId, teamName: 'Refunder', questionCode: 'RFD01', price: 100, status: 'UNSOLVED' });
+
+    const res = await request(bundle.app)
+      .post('/api/host/purchases/refund')
+      .set(hostAuth(g.hostToken))
+      .send({ teamId: t.teamId, questionId: q.id, reason: 'duplicate purchase' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true });
+
+    // Balance restored, purchase gone, question back on the market.
+    const st = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    const team = st.body.teams.find((x: { id: string }) => x.id === t.teamId);
+    expect(team.coins).toBe(1000);
+    expect(st.body.purchases.some((p: { questionId: string }) => p.questionId === q.id)).toBe(false);
+    const qRow = st.body.questions.find((x: { id: string }) => x.id === q.id);
+    expect(qRow.status).toBe('AVAILABLE');
+
+    const audit = await admin.auditLog.findFirst({ where: { gameId: st.body.meta.id, action: 'REFUND_PURCHASE' } });
+    expect(audit).not.toBeNull();
+    expect(audit!.reason).toBe('duplicate purchase');
+  });
+
+  it('refund guards: not-owned 404, solved 409, repeated refund 404', async () => {
+    const g = await createGame('H2B RefundGuards');
+    const t = await joinTeam(g.gameCode, 'Guardian', 'Ada');
+    const qSell = await createQuestion(g.hostToken, question('RFD10'));
+    const qSolved = await createQuestion(g.hostToken, question('RFD11'));
+    await startGame(g.gameCode, g.hostToken);
+
+    // Not owned by this team → 404.
+    const notOwned = await request(bundle.app)
+      .post('/api/host/purchases/refund')
+      .set(hostAuth(g.hostToken))
+      .send({ teamId: t.teamId, questionId: qSell.id, reason: 'not actually owned' });
+    expect(notOwned.status).toBe(404);
+
+    // Buy one, solve it, then refund → 409 CONFLICT.
+    await request(bundle.app)
+      .post(`/api/team/questions/${qSolved.id}/purchase`)
+      .set(hostAuth(t.teamAccessToken))
+      .send({ idempotencyKey: idem() });
+    await request(bundle.app)
+      .post(`/api/team/questions/${qSolved.id}/submit`)
+      .set(hostAuth(t.teamAccessToken))
+      .send({ idempotencyKey: idem(), answer: { kind: 'free', text: 'Yes' } });
+    const solved = await request(bundle.app)
+      .post('/api/host/purchases/refund')
+      .set(hostAuth(g.hostToken))
+      .send({ teamId: t.teamId, questionId: qSolved.id, reason: 'too late' });
+    expect(solved.status).toBe(409);
+    expect(solved.body.error.code).toBe('CONFLICT');
+
+    // Refund a purchased question, then refund it again → 404 (ownership gone).
+    const qBuy = await createQuestion(g.hostToken, question('RFD12'));
+    await request(bundle.app)
+      .post(`/api/team/questions/${qBuy.id}/purchase`)
+      .set(hostAuth(t.teamAccessToken))
+      .send({ idempotencyKey: idem() });
+    const first = await request(bundle.app)
+      .post('/api/host/purchases/refund')
+      .set(hostAuth(g.hostToken))
+      .send({ teamId: t.teamId, questionId: qBuy.id, reason: 'was a mistake' });
+    expect(first.status).toBe(200);
+    const second = await request(bundle.app)
+      .post('/api/host/purchases/refund')
+      .set(hostAuth(g.hostToken))
+      .send({ teamId: t.teamId, questionId: qBuy.id, reason: 'double refund' });
+    expect(second.status).toBe(404);
+  });
+});

@@ -298,7 +298,22 @@ export interface HostGameState {
   transactions: TransactionDto[];
   audit: AuditLogEntry[];
   leaderboard: LeaderboardRow[];
+  /** Owned questions across all teams — the refundable purchase surface. */
+  purchases: HostPurchase[];
   lastEventSeq: number;
+}
+
+/** A purchase (owned question) visible to the host for refund administration. */
+export interface HostPurchase {
+  teamId: string;
+  teamName: string;
+  questionId: string;
+  questionCode: string;
+  title: string;
+  /** The price the owning team paid (what a refund restores). */
+  price: number;
+  status: QuestionOwnershipStatus;
+  purchasedAt: string;
 }
 
 export interface AuditLogEntry {

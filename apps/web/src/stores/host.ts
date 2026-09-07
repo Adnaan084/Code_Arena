@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ActivityDto, HostGameState, LeaderboardRow, QuestionAdmin, TeamPresenceDto, TeamSummary, TransactionDto } from '@wcc/shared';
+import type { ActivityDto, HostGameState, HostPurchase, LeaderboardRow, QuestionAdmin, TeamPresenceDto, TeamSummary, TransactionDto } from '@wcc/shared';
 import type { GameMeta, AuditLogEntry } from '@wcc/shared';
 
 /**
@@ -15,6 +15,7 @@ interface HostState {
   transactions: TransactionDto[];
   leaderboard: LeaderboardRow[];
   audit: AuditLogEntry[];
+  purchases: HostPurchase[];
   lastEventSeq: number;
   /** teamId → live connected-seat count (from team:presence). */
   presence: Record<string, TeamPresenceDto>;
@@ -33,6 +34,7 @@ const initial = {
   transactions: [],
   leaderboard: [],
   audit: [],
+  purchases: [],
   lastEventSeq: 0,
   presence: {},
 };
@@ -49,6 +51,10 @@ export const useHostStore = create<HostState>()((set, get) => ({
       transactions: s.transactions,
       leaderboard: s.leaderboard,
       audit: s.audit,
+      // The snapshot is wholesale-replaced; a payload that omits a field must
+      // degrade to the empty value rather than clobbering the store to undefined
+      // (purchases is the one H2-B field the host wire shape historically lacked).
+      purchases: s.purchases ?? [],
       lastEventSeq: s.lastEventSeq,
     }),
 

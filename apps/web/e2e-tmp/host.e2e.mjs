@@ -299,12 +299,186 @@ async function main() {
     if (await toolbarBtn('START').isDisabled()) throw new Error('START should be enabled again after reset');
   });
 
+  // ─────────────────────────────────────────────────────────────────────
+  // H2-B TEAM ADMIN + ECONOMY — every control is driven through the REAL
+  // Host Console "Team Administration" section + its confirmation modals,
+  // and every assertion reads the server-authoritative /host/state snapshot
+  // (team status, balances, purchases). No fake/local state.
+  // ─────────────────────────────────────────────────────────────────────
+  const readTeam = async () => {
+    const { status, data } = await apiJson('/host/state', { token: hostToken });
+    if (status !== 200) throw new Error(`host/state → ${status}`);
+    return (data?.teams ?? []).find((t) => t.name === 'E2E Team Alpha') ?? null;
+  };
+  const readPurchases = async () => {
+    const { data } = await apiJson('/host/state', { token: hostToken });
+    return data?.purchases ?? [];
+  };
+  const rowButton = (label) => page.locator(`button:has-text("${label}")`).first();
+
+  await check('H2-B: team administration section lists the team (ACTIVE + BAL 1,000)', async () => {
+    await waitForBody(page, 'TEAM ADMINISTRATION');
+    await waitForBody(page, 'E2E Team Alpha', 15000);
+    if ((await rowButton('DISQUALIFY').count()) === 0) throw new Error('DISQUALIFY control missing for ACTIVE team');
+    const b = await readTeam();
+    if (!b || b.status !== 'ACTIVE' || b.coins !== 1000) throw new Error(`team = ${JSON.stringify(b)}`);
+  });
+
+  await check('H2-B: canceling the DISQUALIFY dialog performs no action', async () => {
+    await rowButton('DISQUALIFY').click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await waitForBody(page, 'DISQUALIFY TEAM?', 10000);
+    await page.locator('[role="dialog"] button:has-text("CANCEL")').click();
+    await page.waitForSelector('[role="dialog"]', { state: 'detached', timeout: 8000 }).catch(() => {});
+    const b = await readTeam();
+    if (!b || b.status !== 'ACTIVE' || b.coins !== 1000) throw new Error(`team after cancel = ${JSON.stringify(b)}`);
+  });
+
+  await check('H2-B: confirming DISQUALIFY marks the team DISQUALIFIED (server-authoritative)', async () => {
+    await rowButton('DISQUALIFY').click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await waitForBody(page, 'DISQUALIFY TEAM?', 10000);
+    await dialogConfirm('DISQUALIFY').click();
+    // Modal closes on success (result.ok) and the store resyncs; wait for the
+    // row to flip from DISQUALIFY → REINSTATE rather than matching the modal
+    // description text ("The team is marked DISQUALIFIED…") which would pass
+    // before the store update lands.
+    await page.waitForSelector('button:has-text("REINSTATE")', { timeout: 15000 });
+    const b = await readTeam();
+    if (!b || b.status !== 'DISQUALIFIED') throw new Error(`team = ${JSON.stringify(b)}`);
+    if (b.coins !== 1000) throw new Error('disqualify changed the balance');
+  });
+
+  await check('H2-B: REINSTATE returns the team to ACTIVE and restores participation', async () => {
+    await rowButton('REINSTATE').click();
+    await page.waitForSelector('button:has-text("DISQUALIFY")', { timeout: 15000 });
+    const b = await readTeam();
+    if (!b || b.status !== 'ACTIVE' || b.coins !== 1000) throw new Error(`team = ${JSON.stringify(b)}`);
+  });
+
+  await check('H2-B: ADD COINS through the confirm modal → authoritative balance 1,250', async () => {
+    await rowButton('ADD COINS').click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await waitForBody(page, 'ADD COINS', 10000);
+    await page.fill('input#coin-amount', '250');
+    await page.fill('input#coin-reason', 'E2E head start');
+    await dialogConfirm('ADD COINS').click();
+    await waitForBody(page, 'BAL 1,250', 15000);
+    const b = await readTeam();
+    if (!b || b.coins !== 1250) throw new Error(`coins = ${b?.coins}`);
+  });
+
+  await check('H2-B: REMOVE COINS through the confirm modal → authoritative balance 900', async () => {
+    await rowButton('REMOVE COINS').click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await waitForBody(page, 'REMOVE COINS', 10000);
+    await page.fill('input#coin-amount', '350');
+    await page.fill('input#coin-reason', 'E2E entry fee');
+    await dialogConfirm('REMOVE COINS').click();
+    await waitForBody(page, 'BAL 900', 15000);
+    const b = await readTeam();
+    if (!b || b.coins !== 900) throw new Error(`coins = ${b?.coins}`);
+  });
+
+  await check('H2-B: invalid coin input (zero) disables the confirm button', async () => {
+    await rowButton('REMOVE COINS').click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await page.fill('input#coin-amount', '0');
+    await page.fill('input#coin-reason', 'E2E invalid');
+    if (!(await dialogConfirm('REMOVE COINS').isDisabled())) throw new Error('confirm should be disabled for amount 0');
+    await page.locator('[role="dialog"] button:has-text("CANCEL")').click();
+    await page.waitForSelector('[role="dialog"]', { state: 'detached', timeout: 8000 }).catch(() => {});
+    const b = await readTeam();
+    if (b?.coins !== 900) throw new Error(`coins changed = ${b?.coins}`);
+  });
+
+  await check('H2-B: server rejects an oversized removal and surfaces the error toast', async () => {
+    await rowButton('REMOVE COINS').click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await page.fill('input#coin-amount', '999999');
+    await page.fill('input#coin-reason', 'E2E too much');
+    await dialogConfirm('REMOVE COINS').click();
+    await waitForBody(page, 'Could not adjust coins', 15000);
+    // Modal stays open on failure so the host can retry/cancel; balance untouched.
+    if ((await page.locator('[role="dialog"]').count()) === 0) throw new Error('modal closed after failed adjustment');
+    await page.locator('[role="dialog"] button:has-text("CANCEL")').click();
+    await page.waitForSelector('[role="dialog"]', { state: 'detached', timeout: 8000 }).catch(() => {});
+    const b = await readTeam();
+    if (b?.coins !== 900) throw new Error(`coins changed after rejection = ${b?.coins}`);
+  });
+
+  // ── Refund setup: seed one question, restart the game, buy via the real team UI ──
+  await check('H2-B: setup — seed question + start game (API)', async () => {
+    const q = {
+      code: 'H2BQ1', type: 'MULTIPLE_CHOICE', difficulty: 'EASY', category: 'C SYNTAX',
+      title: 'Refund target', body: 'one', price: 100, reward: 200,
+      answerData: { type: 'MULTIPLE_CHOICE', options: ['a', 'b'], correctIndex: 0 },
+    };
+    const add = await apiJson('/host/questions', { method: 'POST', token: hostToken, body: q });
+    if (add.status !== 201 && add.status !== 200) throw new Error(`add question → ${add.status}`);
+    const st = await apiJson('/host/start', { method: 'POST', token: hostToken });
+    if (st.status !== 200) throw new Error(`start → ${st.status}`);
+    const s = await apiJson('/host/state', { token: hostToken });
+    if (s.data?.meta?.state !== 'MARKET_OPEN') throw new Error(`state=${s.data?.meta?.state}`);
+  });
+
+  await check('H2-B: setup — team buys the question through the real UI (BAL 800)', async () => {
+    const t = globalThis.__teamPage;
+    await t.goto(`${BASE}/team/market`);
+    await t.waitForSelector('[title="Team coins (server-authoritative)"] span', { timeout: 25000 });
+    await t.waitForFunction(() => document.body.innerText.includes('H2BQ1'), undefined, { timeout: 20000 });
+    await t.locator(`div.rounded-xl:has-text("H2BQ1") button:has-text("BUY")`).first().click();
+    await t.waitForFunction(
+      (v) => { const el = document.querySelector('[title="Team coins (server-authoritative)"] span'); return el && el.innerText.trim() === v; },
+      '800',
+      { timeout: 25000 },
+    );
+    const own = (await readPurchases()).find((p) => p.questionCode === 'H2BQ1');
+    if (!own) throw new Error('purchase not visible on host refund surface');
+  });
+
+  await check('H2-B: REFUND identifies the purchase in the modal and restores the balance', async () => {
+    // Wait for the purchase to appear on the host refund surface (authoritative state)
+    await page.waitForFunction(
+      async (token) => {
+        const res = await fetch(`/api/host/state`, { headers: { Authorization: `Bearer ${token}` } });
+        const data = await res.json().catch(() => null);
+        return (data?.purchases ?? []).some((p) => p.questionCode === 'H2BQ1' && p.status === 'UNSOLVED');
+      },
+      hostToken,
+      { timeout: 20000 },
+    );
+    const own = (await readPurchases()).find((p) => p.questionCode === 'H2BQ1');
+    if (!own) throw new Error('purchase missing before refund');
+    // Wait for the REFUND button to exist and be enabled (the team row has it).
+    const refundBtn = page.locator('button:has-text("REFUND")').first();
+    await refundBtn.waitFor({ state: 'visible', timeout: 10000 });
+    if (await refundBtn.isDisabled()) throw new Error('REFUND button disabled');
+    await refundBtn.click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await waitForBody(page, 'REFUND PURCHASE?', 10000);
+    // Deterministic app condition: the host store must have received the purchase
+    // over its authoritative state:sync before the dropdown can offer it. Waiting
+    // on the option (not a fixed delay) makes the flow converge regardless of
+    // whether the post-buy resync beats the modal render. `attached` (not the
+    // default `visible`) because a <option> inside a closed <select> is never
+    // considered visible by Playwright.
+    await page.waitForSelector(`#refund-pick option[value="${own.questionId}"]`, { state: 'attached', timeout: 15000 });
+    await page.selectOption('#refund-pick', own.questionId);
+    await page.fill('input#refund-reason', 'duplicate purchase');
+    await dialogConfirm('REFUND').click();
+    await waitForBody(page, 'BAL 900', 15000); // 800 + 100 price restored
+    const b = await readTeam();
+    if (!b || b.coins !== 900) throw new Error(`coins after refund = ${b?.coins}`);
+    if ((await readPurchases()).some((p) => p.questionCode === 'H2BQ1')) throw new Error('purchase still present after refund');
+  });
+
   await globalThis.__teamPage?.context?.close?.().catch(() => {});
   await globalThis.__hostCtx?.close?.().catch(() => {});
   await browser.close();
 
   // ─────────────────────────────────────────────────────────────────────
-  console.log('\n===== H1 HOST DASHBOARD + H2-A HOST LIFECYCLE E2E =====');
+  console.log('\n===== H1 HOST DASHBOARD + H2-A LIFECYCLE + H2-B TEAM/ECONOMY E2E =====');
   let pass = 0, fail = 0;
   for (const r of results) {
     if (r.ok === 'PASS') pass += 1; else fail += 1;

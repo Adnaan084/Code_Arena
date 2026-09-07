@@ -5,7 +5,7 @@ import { actionLimiter, apiLimiter } from '../middleware/ratelimit';
 import { requireAuth, requireHost, type AuthedRequest } from '../auth/guard';
 import { startGame, pauseGame, resumeGame, closeMarket, finalizeGame, resetRound } from '../domain/games';
 import { listQuestions, createQuestion, updateQuestion, deleteQuestion, toggleEnabled, importQuestions, exportQuestions } from '../domain/questions';
-import { listTeams, disqualifyTeam, reinstateTeam, adjustCoins, refundPurchase, cancelTradeAdmin, createAnnouncement, getLeaderboard, getAuditLog, getTransactions, getActivity, updateConfig, forceCloseMarket } from '../domain/admin';
+import { listTeams, listPurchases, disqualifyTeam, reinstateTeam, adjustCoins, refundPurchase, cancelTradeAdmin, createAnnouncement, getLeaderboard, getAuditLog, getTransactions, getActivity, updateConfig, forceCloseMarket } from '../domain/admin';
 import { expireStaleTrades } from '../domain/trades';
 import { auditAction } from '../domain/feed';
 import { currentSeq, toGameMeta, toAuditLogEntry } from '../domain/serializers';
@@ -41,7 +41,7 @@ hostRouter.use(requireHost);
 
 hostRouter.get('/state', h(async (req: AuthedRequest, res: Response) => {
   const game = req.game;
-  const [teams, questions, activity, leaderboard, seq, transactions, audit] = await Promise.all([
+  const [teams, questions, activity, leaderboard, seq, transactions, audit, purchases] = await Promise.all([
     listTeams(DB, game),
     listQuestions(DB, game),
     getActivity(DB, game),
@@ -49,6 +49,7 @@ hostRouter.get('/state', h(async (req: AuthedRequest, res: Response) => {
     currentSeq(DB, game.id),
     getTransactions(DB, game),
     getAuditLog(DB, game),
+    listPurchases(DB, game),
   ]);
   const meta = toGameMeta(game, [], seq);
   return res.json({
@@ -59,6 +60,7 @@ hostRouter.get('/state', h(async (req: AuthedRequest, res: Response) => {
     leaderboard,
     transactions,
     audit: audit.map(toAuditLogEntry),
+    purchases,
     lastEventSeq: seq,
   });
 }));

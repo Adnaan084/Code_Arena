@@ -28,3 +28,10 @@ apps/server/prisma/*.db-journal
 .idea/
 .DS_Store
 Thumbs.db
+
+# Claude Code local settings (never share: per-machine permissions, paths, credentials)
+.claude/settings.json
+.claude/settings.local.json
+
+# Local diagnostic scratch (the committed *.e2e.mjs harnesses stay tracked; diag-*.mjs is scratch)
+apps/web/e2e-tmp/diag-*.mjs

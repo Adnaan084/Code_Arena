@@ -2,7 +2,8 @@
  * Seed: provisions a throwaway demo game with the full sample question bank
  * and two teams so the UI can be explored immediately in development.
  * (In production the host creates a game from the dashboard; seeding a game
- *  here is a dev convenience only.)
+ *  here is a dev convenience only.
+ * )
  */
 import 'dotenv/config';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';

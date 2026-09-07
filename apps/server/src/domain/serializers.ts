@@ -5,6 +5,7 @@
  */
 import type {
   Announcement,
+  AuditLog,
   Game,
   GameEvent,
   Question,
@@ -16,6 +17,7 @@ import type {
 import {
   type ActivityDto,
   type AnswerData,
+  type AuditLogEntry,
   type GameConfig,
   type GameMeta,
   type InventoryItem,
@@ -82,8 +84,21 @@ export function toGameMeta(
     maxTeams: config.maxTeams,
     playersPerTeam: config.playersPerTeam,
     gameDurationMinutes: config.gameDurationMinutes,
+    startingCoins: config.startingCoins,
     announcements: announcements.map((a) => ({ id: a.id, message: a.message, createdAt: a.createdAt.toISOString() })),
     lastEventSeq: Number(lastEventSeq),
+  };
+}
+
+/** Audit row → wire DTO (detail is a JSON column; the client renders it verbatim). */
+export function toAuditLogEntry(a: Pick<AuditLog, 'id' | 'actorType' | 'actorName' | 'action' | 'detail' | 'createdAt'>): AuditLogEntry {
+  return {
+    id: a.id,
+    actorType: a.actorType as AuditLogEntry['actorType'],
+    actorName: a.actorName,
+    action: a.action,
+    detail: a.detail as unknown,
+    createdAt: a.createdAt.toISOString(),
   };
 }
 

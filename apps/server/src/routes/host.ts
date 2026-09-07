@@ -7,7 +7,7 @@ import { startGame, pauseGame, resumeGame, closeMarket, finalizeGame, resetRound
 import { listQuestions, createQuestion, updateQuestion, deleteQuestion, toggleEnabled, importQuestions, exportQuestions } from '../domain/questions';
 import { listTeams, disqualifyTeam, reinstateTeam, adjustCoins, refundPurchase, cancelTradeAdmin, createAnnouncement, getLeaderboard, getAuditLog, getTransactions, getActivity, updateConfig, forceCloseMarket } from '../domain/admin';
 import { expireStaleTrades } from '../domain/trades';
-import { currentSeq, toGameMeta } from '../domain/serializers';
+import { currentSeq, toGameMeta, toAuditLogEntry } from '../domain/serializers';
 import {
   questionUpsertSchema,
   questionImportSchema,
@@ -40,16 +40,26 @@ hostRouter.use(requireHost);
 
 hostRouter.get('/state', h(async (req: AuthedRequest, res: Response) => {
   const game = req.game;
-  const [teams, questions, activity, leaderboard, seq, transactions] = await Promise.all([
+  const [teams, questions, activity, leaderboard, seq, transactions, audit] = await Promise.all([
     listTeams(DB, game),
     listQuestions(DB, game),
     getActivity(DB, game),
     getLeaderboard(DB, game),
     currentSeq(DB, game.id),
     getTransactions(DB, game),
+    getAuditLog(DB, game),
   ]);
   const meta = toGameMeta(game, [], seq);
-  return res.json({ meta, teams, questions, activity, leaderboard, transactions, lastEventSeq: seq });
+  return res.json({
+    meta,
+    teams,
+    questions,
+    activity,
+    leaderboard,
+    transactions,
+    audit: audit.map(toAuditLogEntry),
+    lastEventSeq: seq,
+  });
 }));
 
 hostRouter.post('/start', actionLimiter, h(async (req: AuthedRequest, res: Response) => {

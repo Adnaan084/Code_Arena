@@ -29,7 +29,7 @@ displayRouter.get('/:code', async (req: Request, res: Response) => {
     currentSeq(DB, game.id),
   ]);
   const meta = toGameMeta(game, await DB.announcement.findMany({ where: { gameId: game.id }, orderBy: { createdAt: 'desc' }, take: 10 }), seq);
-  res.json({ meta, leaderboard, recentActivity: [...activity].reverse() });
+  res.json({ meta, leaderboard, recentActivity: [...activity].reverse(), lastEventSeq: seq });
 });
 
 displayRouter.get('/:code/events', async (req: Request, res: Response) => {

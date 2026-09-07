@@ -4,8 +4,10 @@ import { createServer, Server as HttpServer } from 'http';
 import type { Express } from 'express';
 import { prisma } from '../lib/prisma';
 import { sha256 } from '../auth/tokens';
-import { toGameMeta, toLeaderboard, currentSeq, toActivity, toTeamSummary, toMarketItem, toTradeDto, toInventoryItem } from '../domain/serializers';
+import { toGameMeta, toLeaderboard, currentSeq, toActivity, toTeamSummary, toMarketItem, toTradeDto, toInventoryItem, toAuditLogEntry } from '../domain/serializers';
 import { advancePhaseIfNeeded } from '../domain/games';
+import { listQuestions } from '../domain/questions';
+import { getTransactions, getAuditLog } from '../domain/admin';
 import { expireStaleTrades } from '../domain/trades';
 import { effectiveState, phaseRules, type RuleConfig } from '@wcc/shared';
 
@@ -161,8 +163,24 @@ export function createSocketServer(app: Express, http: HttpServer) {
     const hash = sha256(token);
     const isHost = game.hostTokenHash === hash;
     if (isHost) {
-      const teams = (await prisma.team.findMany({ where: { gameId: game.id }, orderBy: { joinOrder: 'asc' } })).map(toTeamSummary);
-      sock.emit('state:sync', { meta, teams, leaderboard: lb, activity, lastEventSeq: seq });
+      // Host dashboard gets the full role-shaped snapshot: teams plus the
+      // question bank, transaction ledger and audit trail it renders.
+      const [teams, questions, transactions, audit] = await Promise.all([
+        prisma.team.findMany({ where: { gameId: game.id }, orderBy: { joinOrder: 'asc' } }).then((rows) => rows.map(toTeamSummary)),
+        listQuestions(prisma, game),
+        getTransactions(prisma, game),
+        getAuditLog(prisma, game),
+      ]);
+      sock.emit('state:sync', {
+        meta,
+        teams,
+        questions,
+        activity,
+        transactions,
+        audit: audit.map(toAuditLogEntry),
+        leaderboard: lb,
+        lastEventSeq: seq,
+      });
     } else {
       const team = await prisma.team.findFirst({ where: { gameId: game.id, accessTokenHash: hash } });
       if (!team) return;

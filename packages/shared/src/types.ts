@@ -180,6 +180,12 @@ export interface TeamSummary {
   online: boolean;
 }
 
+/** Extended team summary for host lobby (includes player names when available). */
+export interface TeamSummaryWithMembers extends TeamSummary {
+  /** Player display names per seat (0..playersPerTeam-1). */
+  members?: { playerName: string }[];
+}
+
 export type TradeDirection = 'IN' | 'OUT';
 
 export interface TradeDto {
@@ -204,6 +210,8 @@ export interface TransactionDto {
   balanceAfter: number;
   reason: string;
   createdAt: string;
+  /** Team this transaction belongs to (present on host-level lists). */
+  teamId?: string;
 }
 
 export interface ActivityDto {
@@ -247,6 +255,8 @@ export interface GameMeta {
   /** Seats per team (2 for a two-player match). Drives lobby presence UX. */
   playersPerTeam: number;
   gameDurationMinutes: number;
+  /** Starting coins per team (server config). */
+  startingCoins: number;
   announcements: AnnouncementDto[];
   lastEventSeq: number;
 }
@@ -254,7 +264,12 @@ export interface GameMeta {
 export interface TeamGameState {
   meta: GameMeta;
   team: TeamSummary;
+  marketplace: MarketItem[];
+  inventory: InventoryItem[];
+  trades: TradeDto[];
   transactions: TransactionDto[];
+  leaderboard: LeaderboardRow[];
+  activity: ActivityDto[];
   lastEventSeq: number;
 }
 
@@ -262,15 +277,18 @@ export interface PublicDisplayState {
   meta: GameMeta;
   leaderboard: LeaderboardRow[];
   recentActivity: ActivityDto[];
+  lastEventSeq: number;
 }
 
 export interface HostGameState {
   meta: GameMeta;
   teams: TeamSummary[];
+  questions: QuestionAdmin[];
   activity: ActivityDto[];
   transactions: TransactionDto[];
   audit: AuditLogEntry[];
   leaderboard: LeaderboardRow[];
+  lastEventSeq: number;
 }
 
 export interface AuditLogEntry {
@@ -278,6 +296,6 @@ export interface AuditLogEntry {
   actorType: 'HOST' | 'SYSTEM' | 'TEAM';
   actorName: string | null;
   action: string;
-  detail: string | null;
+  detail: unknown;
   createdAt: string;
 }

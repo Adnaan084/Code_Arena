@@ -1,0 +1,71 @@
+@import 'tailwindcss';
+
+/*
+ * Will It Compile? — theme.
+ * Dark, terminal-inspired, high-contrast for a projected room.
+ * Tokens live here (Tailwind v4 CSS-first config); components only use utilities.
+ */
+
+@theme {
+  --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, 'Cascadia Code', 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Ink scale — panel surfaces on a near-black ground */
+  --color-ink-950: #06080d;
+  --color-ink-900: #0b1016;
+  --color-ink-850: #0e1420;
+  --color-ink-800: #141c2b;
+  --color-ink-700: #202a3d;
+  --color-ink-600: #2f3b52;
+
+  /* Foregrounds */
+  --color-fg: #e7edf4;
+  --color-fg-muted: #9aa7b8;
+  --color-fg-faint: #66717f;
+
+  /* Semantic accents */
+  --color-positive: #34d399;
+  --color-negative: #f87171;
+  --color-warn: #fbbf24;
+  --color-info: #38bdf8;
+  --color-accent: #22d3ee;
+  --color-violent: #a78bfa;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background-color: var(--color-ink-950);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+
+  /* Keep long code lines contained everywhere, not just in the code viewer. */
+  code,
+  pre {
+    font-family: var(--font-mono);
+  }
+}
+
+@layer utilities {
+  /* Subtle scanline/terminal texture for the projector and hero panels. */
+  .terminal-grid {
+    background-image:
+      linear-gradient(rgba(34, 211, 238, 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(34, 211, 238, 0.035) 1px, transparent 1px);
+    background-size: 36px 36px;
+  }
+}

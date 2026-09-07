@@ -1063,3 +1063,169 @@ describe('concurrency: simultaneous trade acceptance', () => {
     expect(beta!.coins).toBe(950);
   });
 });
+
+// ─── H2-A: host lifecycle routes ────────────────────────────────────────
+describe('host lifecycle routes (H2-A)', () => {
+  it('start: requires a registered team (409) and transitions LOBBY → MARKET_OPEN', async () => {
+    const g = await createGame('H2 Start');
+
+    // No team yet → the host cannot start.
+    const noTeam = await request(bundle.app).post('/api/host/start').set(hostAuth(g.hostToken));
+    expect(noTeam.status).toBe(409);
+    expect(noTeam.body.error.code).toBe('GAME_STATE');
+
+    await joinTeam(g.gameCode, 'Starter', 'Ada');
+    const res = await request(bundle.app).post('/api/host/start').set(hostAuth(g.hostToken));
+    expect(res.status).toBe(200);
+    expect(res.body.game.state).toBe('MARKET_OPEN');
+    expect(res.body.game.startTime).toBeTruthy();
+    expect(res.body.game.endTime).toBeTruthy();
+    expect(res.body.events.map((e: { type: string }) => e.type)).toEqual(
+      expect.arrayContaining(['GAME_STARTED', 'MARKET_OPENED']),
+    );
+
+    // Starting again while in-play is refused.
+    const again = await request(bundle.app).post('/api/host/start').set(hostAuth(g.hostToken));
+    expect(again.status).toBe(409);
+    expect(again.body.error.code).toBe('GAME_STATE');
+  });
+
+  it('pause + resume: pause sets pausedAt (PAUSED), resume shifts the clock forward', async () => {
+    const g = await createGame('H2 Pause');
+    await joinTeam(g.gameCode, 'Pauser', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+
+    const paused = await request(bundle.app).post('/api/host/pause').set(hostAuth(g.hostToken));
+    expect(paused.status).toBe(200);
+    expect(paused.body.game.pausedAt).toBeTruthy();
+    expect(paused.body.events.map((e: { type: string }) => e.type)).toContain('GAME_PAUSED');
+
+    // Effective (display) state is PAUSED even though the persisted state stays MARKET_OPEN.
+    const st1 = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    expect(st1.body.meta.state).toBe('PAUSED');
+
+    // Double-pause is refused.
+    const again = await request(bundle.app).post('/api/host/pause').set(hostAuth(g.hostToken));
+    expect(again.status).toBe(409);
+
+    // Resume shifts start/end forward by the pause so the clock is not lost.
+    const endBefore = new Date(paused.body.game.endTime).getTime();
+    const resumed = await request(bundle.app).post('/api/host/resume').set(hostAuth(g.hostToken));
+    expect(resumed.status).toBe(200);
+    expect(resumed.body.game.pausedAt).toBeNull();
+    expect(resumed.body.game.pausedTotalMs).toBeGreaterThan(0);
+    expect(resumed.body.events.map((e: { type: string }) => e.type)).toContain('GAME_RESUMED');
+    expect(new Date(resumed.body.game.endTime).getTime()).toBeGreaterThan(endBefore);
+
+    const st2 = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    expect(st2.body.meta.state).toBe('MARKET_OPEN');
+
+    // Double-resume is refused.
+    const rAgain = await request(bundle.app).post('/api/host/resume').set(hostAuth(g.hostToken));
+    expect(rAgain.status).toBe(409);
+  });
+
+  it('close-market: freezes the market, refuses while paused, idempotent-reject on repeat', async () => {
+    const g = await createGame('H2 Close');
+    await joinTeam(g.gameCode, 'Closer', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+
+    // Cannot close while paused.
+    await request(bundle.app).post('/api/host/pause').set(hostAuth(g.hostToken));
+    const whilePaused = await request(bundle.app).post('/api/host/close-market').set(hostAuth(g.hostToken));
+    expect(whilePaused.status).toBe(409);
+
+    await request(bundle.app).post('/api/host/resume').set(hostAuth(g.hostToken));
+    const closed = await request(bundle.app).post('/api/host/close-market').set(hostAuth(g.hostToken));
+    expect(closed.status).toBe(200);
+    expect(closed.body.game.state).toBe('MARKET_CLOSED');
+    expect(closed.body.events.map((e: { type: string }) => e.type)).toContain('MARKET_CLOSED');
+
+    // Already closed → 409.
+    const again = await request(bundle.app).post('/api/host/close-market').set(hostAuth(g.hostToken));
+    expect(again.status).toBe(409);
+
+    // From LOBBY → 409.
+    const g2 = await createGame('H2 Close Lobby');
+    const lobbyClose = await request(bundle.app).post('/api/host/close-market').set(hostAuth(g2.hostToken));
+    expect(lobbyClose.status).toBe(409);
+    expect(lobbyClose.body.error.code).toBe('GAME_STATE');
+  });
+
+  it('finalize: locks the game COMPLETED and is idempotent (no duplicate event)', async () => {
+    const g = await createGame('H2 Finalize');
+    await joinTeam(g.gameCode, 'Finalizer', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+    await request(bundle.app).post('/api/host/close-market').set(hostAuth(g.hostToken));
+
+    const done = await request(bundle.app).post('/api/host/finalize').set(hostAuth(g.hostToken));
+    expect(done.status).toBe(200);
+    expect(done.body.game.state).toBe('COMPLETED');
+    expect(done.body.events.map((e: { type: string }) => e.type)).toContain('GAME_COMPLETED');
+
+    const gameRow = await admin.game.findUnique({ where: { code: g.gameCode } });
+    expect(gameRow!.state).toBe('COMPLETED');
+
+    // Re-finalizing is a harmless no-op — exactly one GAME_COMPLETED event total.
+    const again = await request(bundle.app).post('/api/host/finalize').set(hostAuth(g.hostToken));
+    expect(again.status).toBe(200);
+    expect(again.body.game.state).toBe('COMPLETED');
+    expect(await admin.gameEvent.count({ where: { gameId: gameRow!.id, type: 'GAME_COMPLETED' } })).toBe(1);
+  });
+
+  it('reset: wipes round state back to LOBBY and restores teams', async () => {
+    const g = await createGame('H2 Reset');
+    const t = await joinTeam(g.gameCode, 'Resetter', 'Ada');
+    const q = await createQuestion(g.hostToken, question('RST01'));
+    await startGame(g.gameCode, g.hostToken);
+    // Buy a question so there is round state that a reset must wipe.
+    await request(bundle.app)
+      .post(`/api/team/questions/${q.id}/purchase`)
+      .set(hostAuth(t.teamAccessToken))
+      .send({ idempotencyKey: idem() });
+    const gameRow = await admin.game.findUnique({ where: { code: g.gameCode } });
+
+    const res = await request(bundle.app).post('/api/host/reset').set(hostAuth(g.hostToken)).send({ reason: 'demo over' });
+    expect(res.status).toBe(200);
+    expect(res.body.game.state).toBe('LOBBY');
+
+    // Round-scoped state was wiped: purchases, ownerships, old transactions, events.
+    expect(await admin.purchase.count({ where: { gameId: gameRow!.id } })).toBe(0);
+    expect(await admin.questionOwnership.count({ where: { gameId: gameRow!.id } })).toBe(0);
+    expect(await admin.gameEvent.count({ where: { gameId: gameRow!.id } })).toBe(0);
+    // The reset re-grants each team a single INITIAL ("Round reset") transaction.
+    const txns = await admin.transaction.findMany({ where: { gameId: gameRow!.id }, orderBy: { createdAt: 'asc' } });
+    expect(txns).toHaveLength(1);
+    expect(txns[0]).toMatchObject({ type: 'INITIAL', amount: 1000, balanceAfter: 1000, reason: 'Round reset' });
+
+    // Teams are restored to their starting balance and active status.
+    const team = await admin.team.findUnique({ where: { id: t.teamId } });
+    expect(team!.coins).toBe(1000);
+    expect(team!.status).toBe('ACTIVE');
+    expect(team!.score).toBe(0);
+    expect(team!.purchasedCount).toBe(0);
+    expect(team!.solvedCount).toBe(0);
+  });
+
+  it('audit trail: every lifecycle action records an audit entry; reset re-seeds it', async () => {
+    const g = await createGame('H2 Audit');
+    await joinTeam(g.gameCode, 'Auditee', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+    await request(bundle.app).post('/api/host/pause').set(hostAuth(g.hostToken));
+    await request(bundle.app).post('/api/host/resume').set(hostAuth(g.hostToken));
+    await request(bundle.app).post('/api/host/close-market').set(hostAuth(g.hostToken));
+    await request(bundle.app).post('/api/host/finalize').set(hostAuth(g.hostToken));
+
+    const auditBefore = await request(bundle.app).get('/api/host/audit').set(hostAuth(g.hostToken));
+    const actions = auditBefore.body.map((a: { action: string }) => a.action);
+    expect(actions).toEqual(
+      expect.arrayContaining(['START_GAME', 'PAUSE_GAME', 'RESUME_GAME', 'CLOSE_MARKET', 'FINALIZE_GAME']),
+    );
+
+    // reset wipes the old trail and records only the ROUND_RESET entry (with reason).
+    await request(bundle.app).post('/api/host/reset').set(hostAuth(g.hostToken)).send({ reason: 'round 2' });
+    const auditAfter = await request(bundle.app).get('/api/host/audit').set(hostAuth(g.hostToken));
+    expect(auditAfter.body.map((a: { action: string }) => a.action)).toEqual(['ROUND_RESET']);
+    expect(auditAfter.body[0].reason).toBe('round 2');
+  });
+});

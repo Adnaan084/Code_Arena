@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Sprout,
   Users,
@@ -12,12 +12,14 @@ import {
   Scale,
   AlertTriangle,
   Activity,
+  Flag,
 } from 'lucide-react';
-import { Card, CardBody, Badge, Button, EmptyState, Stat } from '../../components/ui';
+import { Card, CardBody, Badge, Button, EmptyState, Stat, Modal } from '../../components/ui';
 import { useHostStore } from '../../stores/host';
 import { useAuthStore } from '../../stores/auth';
 import { useServerPhase, useServerPhaseRules } from '../../stores/clock';
 import { useRemainingTime } from '../../hooks/useRemainingTime';
+import { useHostAction } from '../../hooks/useHostAction';
 import { formatCoins, formatClock, formatTime, timeAgo } from '../../lib/format';
 import type { DisplayState } from '@wcc/shared';
 
@@ -64,6 +66,28 @@ const PHASE_TONE: Record<DisplayState, 'muted' | 'info' | 'positive' | 'warn' | 
   PAUSED: 'warn',
 };
 
+/** Destructive/high-impact lifecycle actions require an explicit confirm. */
+const CONFIRM_META: Record<
+  'close-market' | 'finalize' | 'reset',
+  { title: string; body: string; confirmLabel: string }
+> = {
+  'close-market': {
+    title: 'CLOSE MARKET?',
+    body: 'Closing the market freezes buying, selling, and trading for every team and begins the final scoring sequence.',
+    confirmLabel: 'CLOSE MARKET',
+  },
+  finalize: {
+    title: 'END GAME?',
+    body: 'Ending the game computes the final scores and locks the results. This cannot be undone.',
+    confirmLabel: 'END GAME',
+  },
+  reset: {
+    title: 'RESET GAME?',
+    body: 'Resetting the game will reset the current game state. This action cannot be undone. Purchases, solves, trades, and the ledger will be wiped, and teams return to their starting balance.',
+    confirmLabel: 'RESET GAME',
+  },
+};
+
 export function HostConsole() {
   const { gameCode } = useAuthStore();
   const meta = useHostStore((s) => s.meta);
@@ -73,6 +97,16 @@ export function HostConsole() {
   const transactions = useHostStore((s) => s.transactions);
   const lastEventSeq = useHostStore((s) => s.lastEventSeq);
   const connectedCount = useHostStore((s) => s.connectedCount);
+
+  const { run, isBusy, isBusyAction } = useHostAction();
+  const [confirmAction, setConfirmAction] = useState<'close-market' | 'finalize' | 'reset' | null>(null);
+
+  /** Confirm modals close on success; stay open on failure so the host can retry or cancel. */
+  const confirmAndRun = async () => {
+    if (!confirmAction) return;
+    const ok = await run(confirmAction);
+    if (ok) setConfirmAction(null);
+  };
 
   // Authoritative phase + clock come from time:sync (server); meta.state is the
   // fallback until the first pulse lands.
@@ -113,6 +147,15 @@ export function HostConsole() {
 
   const mkt = marketStatus(serverPhase);
   const inPlay = serverPhase !== 'LOBBY' && serverPhase !== 'COMPLETED';
+
+  // END GAME (finalize): valid once a game has started, until it is complete.
+  // Backend finalizeGame is guardless (and idempotent on COMPLETED); the UI keeps
+  // it off in LOBBY and while paused so a host starts/closes cleanly first.
+  const canEndGame =
+    serverPhase === 'MARKET_OPEN' ||
+    serverPhase === 'FINAL_MINUTE' ||
+    serverPhase === 'MARKET_CLOSED' ||
+    serverPhase === 'FINAL_SCORING';
 
   return (
     <div className="space-y-4">
@@ -186,23 +229,64 @@ export function HostConsole() {
 
           <div className="flex flex-wrap items-center gap-2">
             <span className="mr-1 text-[10px] font-semibold uppercase tracking-widest text-fg-faint">Lifecycle</span>
-            <Button variant={serverPhase === 'LOBBY' ? 'primary' : 'secondary'} size="sm" disabled={serverPhase !== 'LOBBY'}>
+            <Button
+              variant={serverPhase === 'LOBBY' ? 'primary' : 'secondary'}
+              size="sm"
+              disabled={serverPhase !== 'LOBBY' || isBusy}
+              loading={isBusyAction('start')}
+              onClick={() => void run('start')}
+            >
               <Sprout className="size-3.5" /> START
             </Button>
-            <Button variant="secondary" size="sm" disabled={serverPhase !== 'MARKET_OPEN' && serverPhase !== 'FINAL_MINUTE'}>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={(serverPhase !== 'MARKET_OPEN' && serverPhase !== 'FINAL_MINUTE') || isBusy}
+              loading={isBusyAction('pause')}
+              onClick={() => void run('pause')}
+            >
               <Pause className="size-3.5" /> PAUSE
             </Button>
-            <Button variant={serverPhase === 'PAUSED' ? 'primary' : 'ghost'} size="sm" disabled={serverPhase !== 'PAUSED'}>
+            <Button
+              variant={serverPhase === 'PAUSED' ? 'primary' : 'ghost'}
+              size="sm"
+              disabled={serverPhase !== 'PAUSED' || isBusy}
+              loading={isBusyAction('resume')}
+              onClick={() => void run('resume')}
+            >
               <RotateCcw className="size-3.5" /> RESUME
             </Button>
             <Button
               variant="danger"
               size="sm"
-              disabled={serverPhase === 'MARKET_CLOSED' || serverPhase === 'FINAL_SCORING' || serverPhase === 'COMPLETED' || serverPhase === 'LOBBY'}
+              disabled={
+                serverPhase === 'LOBBY' ||
+                serverPhase === 'MARKET_CLOSED' ||
+                serverPhase === 'FINAL_SCORING' ||
+                serverPhase === 'COMPLETED' ||
+                isBusy
+              }
+              loading={isBusyAction('close-market')}
+              onClick={() => setConfirmAction('close-market')}
             >
               <Scale className="size-3.5" /> CLOSE MARKET
             </Button>
-            <Button variant="ghost" size="sm" disabled={serverPhase !== 'COMPLETED'}>
+            <Button
+              variant="danger"
+              size="sm"
+              disabled={!canEndGame || isBusy}
+              loading={isBusyAction('finalize')}
+              onClick={() => setConfirmAction('finalize')}
+            >
+              <Flag className="size-3.5" /> END GAME
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={serverPhase !== 'COMPLETED' || isBusy}
+              loading={isBusyAction('reset')}
+              onClick={() => setConfirmAction('reset')}
+            >
               <AlertTriangle className="size-3.5" /> RESET ROUND
             </Button>
           </div>
@@ -301,6 +385,32 @@ export function HostConsole() {
           </CardBody>
         </Card>
       </div>
+
+      {/* ── Confirmation for destructive lifecycle actions ─────────────── */}
+      <Modal
+        open={confirmAction !== null}
+        onClose={() => {
+          if (!isBusy) setConfirmAction(null);
+        }}
+        title={confirmAction ? CONFIRM_META[confirmAction].title : ''}
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setConfirmAction(null)} disabled={isBusy}>
+              CANCEL
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => void confirmAndRun()}
+              loading={confirmAction !== null && isBusyAction(confirmAction)}
+              disabled={isBusy}
+            >
+              {confirmAction ? CONFIRM_META[confirmAction].confirmLabel : 'CONFIRM'}
+            </Button>
+          </>
+        }
+      >
+        {confirmAction && <p className="text-sm text-fg-muted">{CONFIRM_META[confirmAction].body}</p>}
+      </Modal>
     </div>
   );
 }

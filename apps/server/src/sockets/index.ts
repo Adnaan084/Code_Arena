@@ -44,6 +44,10 @@ export function createSocketServer(app: Express, http: HttpServer) {
       for (const e of events) {
         // Room-scoped: only sockets in this game receive its events.
         io.to(`game:${gameCode}`).emit('game:event', e);
+        // GAME_RELOAD triggers a full authoritative resync on all clients.
+        if (e.type === 'GAME_RELOAD') {
+          io.to(`game:${gameCode}`).emit('reload', { reason: 'game reset' });
+        }
       }
     },
   };

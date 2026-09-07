@@ -67,6 +67,7 @@ export function initRealtime() {
       scheduleResync(120);
     },
     onReload: () => {
+      useClockStore.getState().clear();
       scheduleResync(0);
     },
   });

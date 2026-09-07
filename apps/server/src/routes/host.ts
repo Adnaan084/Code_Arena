@@ -7,6 +7,7 @@ import { startGame, pauseGame, resumeGame, closeMarket, finalizeGame, resetRound
 import { listQuestions, createQuestion, updateQuestion, deleteQuestion, toggleEnabled, importQuestions, exportQuestions } from '../domain/questions';
 import { listTeams, disqualifyTeam, reinstateTeam, adjustCoins, refundPurchase, cancelTradeAdmin, createAnnouncement, getLeaderboard, getAuditLog, getTransactions, getActivity, updateConfig, forceCloseMarket } from '../domain/admin';
 import { expireStaleTrades } from '../domain/trades';
+import { auditAction } from '../domain/feed';
 import { currentSeq, toGameMeta, toAuditLogEntry } from '../domain/serializers';
 import {
   questionUpsertSchema,
@@ -64,30 +65,35 @@ hostRouter.get('/state', h(async (req: AuthedRequest, res: Response) => {
 
 hostRouter.post('/start', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { result, events } = await startGame(DB, req.game.id);
+  await auditAction(DB, req.game, 'START_GAME');
   req.app.get('io')?.emitGameEvents(req.game.code, events);
   res.json({ game: result, events });
 }));
 
 hostRouter.post('/pause', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { result, events } = await pauseGame(DB, req.game.id);
+  await auditAction(DB, req.game, 'PAUSE_GAME');
   req.app.get('io')?.emitGameEvents(req.game.code, events);
   res.json({ game: result, events });
 }));
 
 hostRouter.post('/resume', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { result, events } = await resumeGame(DB, req.game.id);
+  await auditAction(DB, req.game, 'RESUME_GAME');
   req.app.get('io')?.emitGameEvents(req.game.code, events);
   res.json({ game: result, events });
 }));
 
 hostRouter.post('/close-market', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { result, events } = await closeMarket(DB, req.game.id);
+  await auditAction(DB, req.game, 'CLOSE_MARKET');
   req.app.get('io')?.emitGameEvents(req.game.code, events);
   res.json({ game: result, events });
 }));
 
 hostRouter.post('/finalize', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { result, events } = await finalizeGame(DB, req.game.id);
+  await auditAction(DB, req.game, 'FINALIZE_GAME');
   req.app.get('io')?.emitGameEvents(req.game.code, events);
   res.json({ game: result, events });
 }));
@@ -95,7 +101,7 @@ hostRouter.post('/finalize', actionLimiter, h(async (req: AuthedRequest, res: Re
 hostRouter.post('/reset', actionLimiter, h(async (req: AuthedRequest, res: Response) => {
   const { reason } = req.body as { reason?: string };
   const { result } = await resetRound(DB, req.game.id);
-  await import('../domain/feed').then(({ auditAction }) => auditAction(DB, req.game, 'ROUND_RESET', { reason: reason ?? null }));
+  await auditAction(DB, req.game, 'ROUND_RESET', { reason: reason ?? null });
   req.app.get('io')?.emitGameEvents(req.game.code, [{ type: 'GAME_RELOAD', t: Date.now() }]);
   res.json({ game: result });
 }));

@@ -228,12 +228,83 @@ async function main() {
     if (!/^\d{2}:\d{2}$/.test(t ?? '')) throw new Error(`post-reload timer = ${t} (want mm:ss)`);
   });
 
+  // ─────────────────────────────────────────────────────────────────────
+  // H2-A LIFECYCLE — every lifecycle control is driven through the REAL
+  // host console buttons + confirm modal, and every assertion reads the
+  // SERVER-AUTHORITATIVE state (meta.state via /host/state + the dashboard
+  // that the host socket keeps in sync). No fake/local state.
+  // ─────────────────────────────────────────────────────────────────────
+  const toolbarBtn = (label) => page.locator(`button:has-text("${label}")`).first();
+  const dialogConfirm = (label) => page.locator(`[role="dialog"] button:has-text("${label}")`).first();
+  const readState = async () => (await apiJson('/host/state', { token: hostToken })).data?.meta?.state;
+  const expectState = async (want, what) => {
+    const got = await readState();
+    if (got !== want) throw new Error(`${what}: server meta.state = ${got} (want ${want})`);
+  };
+
+  await check('H2: lifecycle buttons respect the current phase (before actions)', async () => {
+    // Still MARKET OPEN after the reload check above.
+    if (!(await toolbarBtn('START').isDisabled())) throw new Error('START should be disabled while in play');
+    if (!(await toolbarBtn('RESUME').isDisabled())) throw new Error('RESUME should be disabled while not paused');
+    if (!(await toolbarBtn('RESET ROUND').isDisabled())) throw new Error('RESET ROUND should be disabled before COMPLETED');
+    if (await toolbarBtn('CLOSE MARKET').isDisabled()) throw new Error('CLOSE MARKET should be enabled while in play');
+    if (await toolbarBtn('END GAME').isDisabled()) throw new Error('END GAME should be enabled while in play');
+  });
+
+  await check('H2: PAUSE button freezes the game (dashboard + server say PAUSED)', async () => {
+    await toolbarBtn('PAUSE').click();
+    await waitForBody(page, 'PAUSED', 15000);
+    await waitForRegex(page, /MARKET PAUSED/);
+    await expectState('PAUSED', 'after pause');
+    // Pause is a real lifecycle event → phase label flips and RESUME unlocks.
+    if (await toolbarBtn('RESUME').isDisabled()) throw new Error('RESUME should be enabled while paused');
+  });
+
+  await check('H2: RESUME button resumes the game — clock authority returns to MARKET OPEN', async () => {
+    await toolbarBtn('RESUME').click();
+    await waitForBody(page, 'MARKET OPEN', 15000);
+    await waitForRegex(page, /TRADING OPEN/);
+    await expectState('MARKET_OPEN', 'after resume');
+  });
+
+  await check('H2: CLOSE MARKET opens a confirm dialog; confirming freezes the market', async () => {
+    await toolbarBtn('CLOSE MARKET').click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await page.waitForFunction(() => /CLOSE MARKET\?/.test(document.body.innerText), undefined, { timeout: 10000 });
+    await dialogConfirm('CLOSE MARKET').click();
+    await waitForBody(page, 'MARKET CLOSED', 15000);
+    await waitForRegex(page, /TRADING CLOSED/);
+    await expectState('MARKET_CLOSED', 'after close-market');
+    if (await toolbarBtn('END GAME').isDisabled()) throw new Error('END GAME should be enabled after market close');
+  });
+
+  await check('H2: END GAME confirm dialog — confirming locks the game as COMPLETED', async () => {
+    await toolbarBtn('END GAME').click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await page.waitForFunction(() => /END GAME\?/.test(document.body.innerText), undefined, { timeout: 10000 });
+    await dialogConfirm('END GAME').click();
+    await waitForBody(page, 'COMPLETED', 15000);
+    await expectState('COMPLETED', 'after finalize');
+    if (await toolbarBtn('RESET ROUND').isDisabled()) throw new Error('RESET ROUND should be enabled once COMPLETED');
+  });
+
+  await check('H2: RESET ROUND confirm dialog — confirming returns the game to a clean LOBBY', async () => {
+    await toolbarBtn('RESET ROUND').click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await page.waitForFunction(() => /RESET GAME\?/.test(document.body.innerText), undefined, { timeout: 10000 });
+    await dialogConfirm('RESET GAME').click();
+    await waitForBody(page, 'LOBBY', 15000);
+    await waitForRegex(page, /MARKET PRE-GAME/);
+    await expectState('LOBBY', 'after reset');
+    if (await toolbarBtn('START').isDisabled()) throw new Error('START should be enabled again after reset');
+  });
+
   await globalThis.__teamPage?.context?.close?.().catch(() => {});
   await globalThis.__hostCtx?.close?.().catch(() => {});
   await browser.close();
 
   // ─────────────────────────────────────────────────────────────────────
-  console.log('\n===== H1 HOST DASHBOARD E2E =====');
+  console.log('\n===== H1 HOST DASHBOARD + H2-A HOST LIFECYCLE E2E =====');
   let pass = 0, fail = 0;
   for (const r of results) {
     if (r.ok === 'PASS') pass += 1; else fail += 1;

@@ -25,6 +25,8 @@ const ACTION_LABEL: Record<string, { done: string; fail: string }> = {
   reinstate: { done: 'Team reinstated', fail: 'reinstate the team' },
   'adjust-coins': { done: 'Coins adjusted', fail: 'adjust coins' },
   refund: { done: 'Purchase refunded', fail: 'refund the purchase' },
+  // H2-C host trade administration.
+  'cancel-trade': { done: 'Trade cancelled', fail: 'cancel the trade' },
 };
 
 const FALLBACK_LABEL = { done: 'Action complete', fail: 'run that action' };
@@ -102,6 +104,13 @@ export function useHostAction() {
     [execute, hostToken],
   );
 
+  /** Admin-cancel a pending trade (the backend validates it is OPEN). */
+  const cancelTrade = useCallback(
+    (tradeId: string, reason: string) =>
+      execute('cancel-trade', () => api.hostCancelTrade(hostToken!, tradeId, reason)),
+    [execute, hostToken],
+  );
+
   const clearError = useCallback(() => setLastError(null), []);
 
   return {
@@ -110,6 +119,7 @@ export function useHostAction() {
     reinstate,
     adjustCoins,
     refund,
+    cancelTrade,
     busyAction,
     /** True while ANY host action is in flight. */
     isBusy: busyAction !== null,

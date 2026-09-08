@@ -21,6 +21,7 @@ import { useServerPhase, useServerPhaseRules } from '../../stores/clock';
 import { useRemainingTime } from '../../hooks/useRemainingTime';
 import { useHostAction } from '../../hooks/useHostAction';
 import { TeamAdmin } from './TeamAdmin';
+import { TradeAdmin } from './TradeAdmin';
 import { formatCoins, formatClock, formatTime, timeAgo } from '../../lib/format';
 import type { DisplayState } from '@wcc/shared';
 
@@ -337,6 +338,9 @@ export function HostConsole() {
         </div>
         <TeamAdmin />
       </div>
+
+      {/* ── H2-C trade administration ───────────────────────────────────── */}
+      <TradeAdmin />
 
       <div className="grid gap-4 lg:grid-cols-2">
         {/* ── Recent activity (live feed) ────────────────────────────────── */}

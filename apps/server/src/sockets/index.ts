@@ -8,7 +8,7 @@ import { toGameMeta, toLeaderboard, currentSeq, toActivity, toTeamSummary, toMar
 import { advancePhaseIfNeeded } from '../domain/games';
 import { listQuestions } from '../domain/questions';
 import { getTransactions, getAuditLog, listPurchases } from '../domain/admin';
-import { expireStaleTrades } from '../domain/trades';
+import { expireStaleTrades, listHostTrades } from '../domain/trades';
 import { effectiveState, phaseRules, type RuleConfig } from '@wcc/shared';
 
 export interface SioHandle {
@@ -170,12 +170,13 @@ export function createSocketServer(app: Express, http: HttpServer) {
       // Host dashboard gets the full role-shaped snapshot: teams plus the
       // question bank, transaction ledger, audit trail and the cross-team
       // purchase surface it renders (refund administration reads these).
-      const [teams, questions, transactions, audit, purchases] = await Promise.all([
+      const [teams, questions, transactions, audit, purchases, trades] = await Promise.all([
         prisma.team.findMany({ where: { gameId: game.id }, orderBy: { joinOrder: 'asc' } }).then((rows) => rows.map(toTeamSummary)),
         listQuestions(prisma, game),
         getTransactions(prisma, game),
         getAuditLog(prisma, game),
         listPurchases(prisma, game),
+        listHostTrades(prisma, game),
       ]);
       sock.emit('state:sync', {
         meta,
@@ -185,6 +186,7 @@ export function createSocketServer(app: Express, http: HttpServer) {
         transactions,
         audit: audit.map(toAuditLogEntry),
         purchases,
+        trades,
         leaderboard: lb,
         lastEventSeq: seq,
       });

@@ -110,6 +110,14 @@ function teamSocket(code: string, token: string): Socket {
   });
 }
 
+function hostSocket(code: string, token: string): Socket {
+  return io(baseUrl, {
+    query: { gameCode: code, token, role: 'host', lastSeq: '0' },
+    transports: ['websocket'],
+    forceNew: true,
+  });
+}
+
 function once<T = unknown>(sock: Socket, event: string, timeoutMs = 6000): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -1486,5 +1494,257 @@ describe('host economy administration (H2-B)', () => {
       .set(hostAuth(g.hostToken))
       .send({ teamId: t.teamId, questionId: qBuy.id, reason: 'double refund' });
     expect(second.status).toBe(404);
+  });
+});
+
+// ─── H2-C: host trade administration ────────────────────────────────────
+describe('host trade administration (H2-C)', () => {
+  let g: Awaited<ReturnType<typeof createGame>>;
+  let gameId: string;
+  let a: Awaited<ReturnType<typeof joinTeam>>;
+  let b: Awaited<ReturnType<typeof joinTeam>>;
+  // Three independent pending offers (each own question pair) so the tests stay
+  // deterministic: a list/guard target, a cancel target, a realtime target.
+  let pairs: { offered: Awaited<ReturnType<typeof createQuestion>>; requested: Awaited<ReturnType<typeof createQuestion>>; tradeId: string }[] = [];
+
+  const code = (i: number, side: 'O' | 'R') => `H2C${i}${side}`;
+
+  beforeAll(async () => {
+    g = await createGame('H2C Trade Admin');
+    gameId = (await admin.game.findUnique({ where: { code: g.gameCode } }))!.id;
+    a = await joinTeam(g.gameCode, 'Trade Alpha', 'Ada');
+    b = await joinTeam(g.gameCode, 'Trade Beta', 'Lin');
+    const created: { offered: Awaited<ReturnType<typeof createQuestion>>; requested: Awaited<ReturnType<typeof createQuestion>> }[] = [];
+    for (let i = 1; i <= 3; i++) {
+      const offered = await createQuestion(g.hostToken, question(code(i, 'O')));
+      const requested = await createQuestion(g.hostToken, question(code(i, 'R')));
+      created.push({ offered, requested });
+    }
+    await startGame(g.gameCode, g.hostToken);
+    // Purchases MUST happen after startGame (canBuy=true) — LOBBY has canBuy=false.
+    for (let i = 1; i <= 3; i++) {
+      const pair = created[i - 1]!;
+      await request(bundle.app)
+        .post(`/api/team/questions/${pair.offered.id}/purchase`)
+        .set(hostAuth(a.teamAccessToken))
+        .send({ idempotencyKey: idem() });
+      await request(bundle.app)
+        .post(`/api/team/questions/${pair.requested.id}/purchase`)
+        .set(hostAuth(b.teamAccessToken))
+        .send({ idempotencyKey: idem() });
+    }
+    for (let i = 1; i <= 3; i++) {
+      const pair = created[i - 1]!;
+      const res = await request(bundle.app)
+        .post('/api/team/trades')
+        .set(hostAuth(a.teamAccessToken))
+        .send({
+          targetTeamId: b.teamId,
+          offeredQuestionId: pair.offered.id,
+          requestedQuestionId: pair.requested.id,
+          coins: i === 1 ? 25 : 0,
+          idempotencyKey: idem(),
+        });
+      expect(res.status).toBe(200);
+      pairs.push({ ...pair, tradeId: res.body.tradeId as string });
+    }
+  });
+
+  it('exposes pending trades in host state: source/target/question/coins/status/timestamps', async () => {
+    const res = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.trades)).toBe(true);
+    const t = res.body.trades.find((x: { id: string }) => x.id === pairs[0]!.tradeId);
+    expect(t).toBeDefined();
+    const tt = t!;
+    expect(tt).toMatchObject({
+      state: 'OPEN',
+      coins: 25,
+      fromTeam: { id: a.teamId, name: 'Trade Alpha' },
+      toTeam: { id: b.teamId, name: 'Trade Beta' },
+    });
+    expect(tt.expiresAt).toBeTruthy();
+    expect(tt.createdAt).toBeTruthy();
+    expect(tt.offered.map((q: { code: string }) => q.code)).toEqual(['H2C1O']);
+    expect(tt.requested.map((q: { code: string }) => q.code)).toEqual(['H2C1R']);
+  });
+
+  it('refuses a team token on the host cancel route (403)', async () => {
+    const res = await request(bundle.app)
+      .post(`/api/host/trades/${pairs[0]!.tradeId}/cancel`)
+      .set(hostAuth(a.teamAccessToken))
+      .send({ reason: 'nope' });
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('FORBIDDEN');
+    // The trade is untouched — still pending.
+    const trade = await admin.trade.findUnique({ where: { id: pairs[0]!.tradeId } });
+    expect(trade!.state).toBe('OPEN');
+  });
+
+  it('rejects an unknown trade id and a trade from another game (404)', async () => {
+    const bad = await request(bundle.app)
+      .post(`/api/host/trades/${'00000000-0000-0000-0000-000000000000'}/cancel`)
+      .set(hostAuth(g.hostToken))
+      .send({ reason: 'oops' });
+    expect(bad.status).toBe(404);
+    expect(bad.body.error.code).toBe('NOT_FOUND');
+
+    // A trade that belongs to a DIFFERENT game must not be cancellable here.
+    const g2 = await createGame('H2C Foreign');
+    const ta2 = await joinTeam(g2.gameCode, 'Foreign A', 'Ada');
+    const tb2 = await joinTeam(g2.gameCode, 'Foreign B', 'Lin');
+    const o2 = await createQuestion(g2.hostToken, question('H2CFO'));
+    const r2 = await createQuestion(g2.hostToken, question('H2CFR'));
+    await startGame(g2.gameCode, g2.hostToken);
+    await request(bundle.app).post(`/api/team/questions/${o2.id}/purchase`).set(hostAuth(ta2.teamAccessToken)).send({ idempotencyKey: idem() });
+    await request(bundle.app).post(`/api/team/questions/${r2.id}/purchase`).set(hostAuth(tb2.teamAccessToken)).send({ idempotencyKey: idem() });
+    const prop = await request(bundle.app).post('/api/team/trades').set(hostAuth(ta2.teamAccessToken)).send({
+      targetTeamId: tb2.teamId,
+      offeredQuestionId: o2.id,
+      requestedQuestionId: r2.id,
+      coins: 0,
+      idempotencyKey: idem(),
+    });
+    expect(prop.status).toBe(200);
+    const foreign = await request(bundle.app)
+      .post(`/api/host/trades/${prop.body.tradeId}/cancel`)
+      .set(hostAuth(g.hostToken)) // host of the FIRST game
+      .send({ reason: 'cross game' });
+    expect(foreign.status).toBe(404);
+    expect(foreign.body.error.code).toBe('NOT_FOUND');
+  });
+
+  it('host cancels a pending trade → CANCELLED, locks released, no longer active, audited + evented', async () => {
+    const tid = pairs[1]!.tradeId;
+    const before = await admin.gameEvent.count({ where: { gameId: gameId, type: 'TRADE_CANCELLED' } });
+
+    const res = await request(bundle.app)
+      .post(`/api/host/trades/${tid}/cancel`)
+      .set(hostAuth(g.hostToken))
+      .send({ reason: 'disputed offer' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true });
+
+    // State transition + timestamps.
+    const trade = await admin.trade.findUnique({ where: { id: tid } });
+    expect(trade!.state).toBe('CANCELLED');
+    expect(trade!.resolvedAt).not.toBeNull();
+
+    // The trade-locked questions are released.
+    for (const pid of [pairs[1]!.offered.id, pairs[1]!.requested.id]) {
+      const o = await admin.questionOwnership.findUnique({ where: { questionId: pid } });
+      expect(o!.tradeLock).toBe(false);
+    }
+
+    // Audit entry records the action + reason; TRADE_CANCELLED event was created.
+    const audit = await admin.auditLog.findFirst({ where: { gameId: gameId, action: 'ADMIN_CANCEL_TRADE' } });
+    expect(audit).not.toBeNull();
+    expect(audit!.reason).toBe('disputed offer');
+    expect(audit!.actorType).toBe('HOST');
+    expect(await admin.gameEvent.count({ where: { gameId: gameId, type: 'TRADE_CANCELLED' } })).toBe(before + 1);
+
+    // Host state no longer presents it as an active (OPEN) trade.
+    const st = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    const t = st.body.trades.find((x: { id: string }) => x.id === tid);
+    expect(t!.state).toBe('CANCELLED');
+    expect(st.body.trades.some((x: { id: string; state: string }) => x.id === tid && x.state === 'OPEN')).toBe(false);
+  });
+
+  it('duplicate cancellation of the same trade is refused (409 CONFLICT)', async () => {
+    const res = await request(bundle.app)
+      .post(`/api/host/trades/${pairs[1]!.tradeId}/cancel`)
+      .set(hostAuth(g.hostToken))
+      .send({ reason: 'twice' });
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('CONFLICT');
+    const t = await admin.trade.findUnique({ where: { id: pairs[1]!.tradeId } });
+    expect(t!.state).toBe('CANCELLED');
+  });
+
+  it('cannot cancel an already-accepted (EXECUTED) trade (409)', async () => {
+    const tid = pairs[0]!.tradeId;
+    // Beta accepts → EXECUTED.
+    const accept = await request(bundle.app)
+      .post(`/api/team/trades/${tid}/accept`)
+      .set(hostAuth(b.teamAccessToken))
+      .send({ idempotencyKey: idem() });
+    expect(accept.status).toBe(200);
+    expect(accept.body.trade.state).toBe('EXECUTED');
+
+    // Host cancel is refused and the EXECUTED state is left untouched.
+    const cancel = await request(bundle.app)
+      .post(`/api/host/trades/${tid}/cancel`)
+      .set(hostAuth(g.hostToken))
+      .send({ reason: 'too late' });
+    expect(cancel.status).toBe(409);
+    expect(cancel.body.error.code).toBe('CONFLICT');
+    const t = await admin.trade.findUnique({ where: { id: tid } });
+    expect(t!.state).toBe('EXECUTED');
+  });
+
+  it('an expired trade shows as EXPIRED (not active) and is not cancellable', async () => {
+    // Pair 3 is still OPEN and untouched — expire it deterministically.
+    const pair3 = pairs[2]!;
+    const tid = pair3.tradeId;
+    await admin.trade.update({ where: { id: tid }, data: { expiresAt: new Date(Date.now() - 1_000) } });
+    const { expireStaleTrades } = await import('../src/domain/trades');
+    const { prisma } = await import('../src/lib/prisma');
+    const game = await admin.game.findUnique({ where: { code: g.gameCode } });
+    const events = await expireStaleTrades(prisma, game!);
+    expect(events.some((e: any) => e.type === 'TRADE_EXPIRED')).toBe(true);
+
+    const st = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    const t = st.body.trades.find((x: { id: string }) => x.id === tid);
+    expect(t.state).toBe('EXPIRED');
+    expect(st.body.trades.some((x: { id: string; state: string }) => x.id === tid && x.state === 'OPEN')).toBe(false);
+
+    const cancel = await request(bundle.app)
+      .post(`/api/host/trades/${tid}/cancel`)
+      .set(hostAuth(g.hostToken))
+      .send({ reason: 'already gone' });
+    expect(cancel.status).toBe(409);
+    expect(cancel.body.error.code).toBe('CONFLICT');
+  });
+
+  it('live host: TRADE_CANCELLED broadcasts and the host resync shows the cancelled trade', async () => {
+    // A fresh pending offer so the realtime path has an OPEN trade to cancel.
+    const o = await createQuestion(g.hostToken, question('H2CLO'));
+    const r = await createQuestion(g.hostToken, question('H2CLR'));
+    await request(bundle.app).post(`/api/team/questions/${o.id}/purchase`).set(hostAuth(a.teamAccessToken)).send({ idempotencyKey: idem() });
+    await request(bundle.app).post(`/api/team/questions/${r.id}/purchase`).set(hostAuth(b.teamAccessToken)).send({ idempotencyKey: idem() });
+    const prop = await request(bundle.app).post('/api/team/trades').set(hostAuth(a.teamAccessToken)).send({
+      targetTeamId: b.teamId,
+      offeredQuestionId: o.id,
+      requestedQuestionId: r.id,
+      coins: 0,
+      idempotencyKey: idem(),
+    });
+    expect(prop.status).toBe(200);
+    const tid = prop.body.tradeId as string;
+
+    const sock = hostSocket(g.gameCode, g.hostToken);
+    // Initial host snapshot already carries the OPEN trade.
+    const sync0 = await once<{ trades: { id: string; state: string }[] }>(sock, 'state:sync');
+    const openInState = sync0.trades.find((x) => x.id === tid);
+    expect(openInState).toBeDefined();
+    expect(openInState!.state).toBe('OPEN');
+
+    // Cancel via the host API → the host socket hears TRADE_CANCELLED.
+    const ev = once<{ type: string }>(sock, 'game:event');
+    const res = await request(bundle.app)
+      .post(`/api/host/trades/${tid}/cancel`)
+      .set(hostAuth(g.hostToken))
+      .send({ reason: 'live host' });
+    expect(res.status).toBe(200);
+    expect((await ev).type).toBe('TRADE_CANCELLED');
+
+    // A fresh state:sync pulled over the socket reports CANCELLED, not active.
+    const syncP = once<{ trades: { id: string; state: string }[] }>(sock, 'state:sync');
+    sock.emit('req:state', { lastSeq: 0 });
+    const sync1 = await syncP;
+    const done = sync1.trades.find((x) => x.id === tid);
+    expect(done).toBeDefined();
+    expect(done!.state).toBe('CANCELLED');
+    sock.disconnect();
   });
 });

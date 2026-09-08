@@ -280,6 +280,23 @@ export async function listTrades(db: DB, game: Game, teamId: string) {
 }
 
 /**
+ * Host trade administration surface: every trade in the game (active + history)
+ * with the From/To team names, question items, coin amount and lifecycle stamps.
+ * Reuses the shared `TradeDto` so REST and socket host state stay identical to
+ * the team wire shape; no viewer is passed, so `direction` is omitted by the
+ * serializer and defaults to 'IN' — the host UI reads fromTeam/toTeam, never
+ * `direction`.
+ */
+export async function listHostTrades(db: DB, game: Game): Promise<ReturnType<typeof toTradeDto>[]> {
+  const trades = await db.trade.findMany({
+    where: { gameId: game.id },
+    orderBy: { createdAt: 'desc' },
+    include: tradeWithRelations,
+  });
+  return (trades as unknown as TradeWithRelations[]).map((t) => toTradeDto(t));
+}
+
+/**
  * Read-only: every ACTIVE team a client could trade with, plus the questions
  * it can currently give up (owned, UNSOLVED, not tied up in a pending trade,
  * under its max trades). Feeds the propose-trade picker; the server remains

@@ -300,6 +300,13 @@ export interface HostGameState {
   leaderboard: LeaderboardRow[];
   /** Owned questions across all teams — the refundable purchase surface. */
   purchases: HostPurchase[];
+  /**
+   * All trades in the game (OPEN and history). The host reads From/To teams and
+   * question/coin details directly; `direction` is team-viewer-specific and
+   * meaningless here (server omits it → defaults to 'IN'), so the UI must never
+   * render it — From → To is unambiguous from fromTeam/toTeam.
+   */
+  trades: TradeDto[];
   lastEventSeq: number;
 }
 

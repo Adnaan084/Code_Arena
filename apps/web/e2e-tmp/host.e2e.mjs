@@ -473,6 +473,206 @@ async function main() {
     if ((await readPurchases()).some((p) => p.questionCode === 'H2BQ1')) throw new Error('purchase still present after refund');
   });
 
+  // ─────────────────────────────────────────────────────────────────────
+  // H2-C HOST TRADE ADMINISTRATION — real UI end-to-end.
+  //
+  // A pending trade is proposed through the REAL team trade flow (Team Alpha
+  // offers HCQ1 to Team Beta for HCQ2 + 50 coins). The REAL Host Console
+  // "Trade Administration" surface then renders it, and the host cancels it
+  // through the confirm modal. Every assertion reads server-authoritative
+  // state (/host/state + the host socket state:sync that drives the console);
+  // the cancellation path goes through the UI, never a direct API call.
+  // ─────────────────────────────────────────────────────────────────────
+  const teamAlphaPage = globalThis.__teamPage;
+
+  await check('H2-C: setup — seed trade questions HCQ1/HCQ2 (host API)', async () => {
+    const q1 = { code: 'HCQ1', type: 'MULTIPLE_CHOICE', difficulty: 'EASY', category: 'C SYNTAX', title: 'H2C offered', body: 'one', price: 100, reward: 200, answerData: { type: 'MULTIPLE_CHOICE', options: ['a', 'b'], correctIndex: 0 } };
+    const q2 = { code: 'HCQ2', type: 'MULTIPLE_CHOICE', difficulty: 'MEDIUM', category: 'LOOPS', title: 'H2C requested', body: 'two', price: 100, reward: 200, answerData: { type: 'MULTIPLE_CHOICE', options: ['c', 'd'], correctIndex: 0 } };
+    for (const q of [q1, q2]) {
+      const r = await apiJson('/host/questions', { method: 'POST', token: hostToken, body: q });
+      if (r.status !== 200 && r.status !== 201) throw new Error(`add ${q.code} → ${r.status}`);
+    }
+    const s = await apiJson('/host/state', { token: hostToken });
+    if (s.data?.meta?.state !== 'MARKET_OPEN') throw new Error(`state=${s.data?.meta?.state} (need MARKET_OPEN)`);
+  });
+
+  let betaPage;
+  await check('H2-C: setup — Team Beta joins through the real UI', async () => {
+    const betaCtx = await browser.newContext();
+    betaPage = await betaCtx.newPage();
+    await betaPage.goto(`${BASE}/join`);
+    await betaPage.fill('input#code', gameCode);
+    await betaPage.fill('input#teamName', 'E2E Team Beta');
+    await betaPage.fill('input#p1', 'BetaOne');
+    await betaPage.fill('input#p2', 'BetaTwo');
+    await betaPage.click('button:has-text("JOIN GAME")');
+    await betaPage.waitForFunction(
+      (v) => { const el = document.querySelector('[title="Team coins (server-authoritative)"] span'); return el && el.innerText.trim() === v; },
+      '1,000',
+      { timeout: 20000 },
+    );
+    globalThis.__betaCtx = betaCtx;
+  });
+
+  await check('H2-C: setup — Team Alpha buys HCQ1 via real UI (BAL 800)', async () => {
+    await teamAlphaPage.goto(`${BASE}/team/market`);
+    await teamAlphaPage.waitForSelector('[title="Team coins (server-authoritative)"] span', { timeout: 25000 });
+    await teamAlphaPage.waitForFunction(() => document.body.innerText.includes('HCQ1'), undefined, { timeout: 20000 });
+    await teamAlphaPage.locator('div.rounded-xl:has-text("HCQ1") button:has-text("BUY")').first().click();
+    await teamAlphaPage.waitForFunction(
+      (v) => { const el = document.querySelector('[title="Team coins (server-authoritative)"] span'); return el && el.innerText.trim() === v; },
+      '800',
+      { timeout: 25000 },
+    );
+  });
+
+  await check('H2-C: setup — Team Beta buys HCQ2 via real UI (BAL 900)', async () => {
+    await betaPage.goto(`${BASE}/team/market`);
+    await betaPage.waitForSelector('[title="Team coins (server-authoritative)"] span', { timeout: 25000 });
+    await betaPage.waitForFunction(() => document.body.innerText.includes('HCQ2'), undefined, { timeout: 20000 });
+    await betaPage.locator('div.rounded-xl:has-text("HCQ2") button:has-text("BUY")').first().click();
+    await betaPage.waitForFunction(
+      (v) => { const el = document.querySelector('[title="Team coins (server-authoritative)"] span'); return el && el.innerText.trim() === v; },
+      '900',
+      { timeout: 25000 },
+    );
+  });
+
+  let tradeId = '';
+  await check('H2-C: setup — Team Alpha proposes HCQ1 ⇄ HCQ2 (+50 coins) via real UI', async () => {
+    await teamAlphaPage.goto(`${BASE}/team/inventory`);
+    await teamAlphaPage.waitForSelector('[title="Team coins (server-authoritative)"] span', { timeout: 25000 });
+    await teamAlphaPage.locator('div.rounded-xl:has-text("HCQ1") button:has-text("TRADE")').first().click();
+    const dialog = teamAlphaPage.locator('[role="dialog"]');
+    await dialog.waitFor({ timeout: 15000 });
+    await dialog.locator('button:has-text("HCQ2")').first().waitFor({ timeout: 15000 });
+    await dialog.locator('button:has-text("HCQ2")').first().click();
+    await dialog.locator('input#trade-coins').fill('50');
+    await dialog.locator('button:has-text("PROPOSE")').click();
+    await teamAlphaPage.waitForSelector('[role="status"]:has-text("Trade proposed")', { timeout: 15000 });
+    // Authoritative: the OPEN trade must reach the host snapshot (via the real
+    // trade event + host socket state:sync) so the console can render it.
+    await page.waitForFunction(
+      (token) => fetch(`/api/host/state`, { headers: { Authorization: `Bearer ${token}` } })
+        .then((r) => r.json())
+        .then((d) => (d?.trades ?? []).some((tr) => tr.state === 'OPEN' && tr.offered?.some((q) => q.code === 'HCQ1')))
+        .catch(() => false),
+      hostToken,
+      { timeout: 20000 },
+    );
+    const st = await apiJson('/host/state', { token: hostToken });
+    const tr = (st.data?.trades ?? []).find((x) => x.state === 'OPEN' && x.offered?.some((q) => q.code === 'HCQ1'));
+    if (!tr) throw new Error('OPEN trade not in host state');
+    tradeId = tr.id;
+  });
+
+  const tradeShort = tradeId.slice(0, 8);
+  const hostCard = () => page.locator(`div.rounded-xl:has-text("#${tradeShort}")`).first();
+  const hostTrade = async () => {
+    const st = await apiJson('/host/state', { token: hostToken });
+    return (st.data?.trades ?? []).find((x) => x.id === tradeId) ?? null;
+  };
+  const dialogExactBtn = (label) => page.locator('[role="dialog"] button').filter({ hasText: new RegExp(`^${label}$`) }).first();
+
+  await check('H2-C: host sees Trade Administration with the open trade in ACTIVE', async () => {
+    await waitForBody(page, 'TRADE ADMINISTRATION');
+    await waitForBody(page, 'ACTIVE TRADES (1)', 15000);
+    const card = hostCard();
+    await card.waitFor({ state: 'visible', timeout: 15000 });
+    const txt = await card.innerText();
+    if (!txt.includes('HCQ1')) throw new Error('offered HCQ1 badge missing');
+    if (!txt.includes('HCQ2')) throw new Error('requested HCQ2 badge missing');
+  });
+
+  await check('H2-C: source (From) and target (To) teams are explicit on the card', async () => {
+    const txt = await hostCard().innerText();
+    if (!txt.includes('E2E Team Alpha')) throw new Error('from team missing');
+    if (!txt.includes('E2E Team Beta')) throw new Error('to team missing');
+  });
+
+  await check('H2-C: coin information is displayed on the open trade', async () => {
+    const txt = await hostCard().innerText();
+    if (!txt.includes('COINS')) throw new Error('COINS label missing');
+    if (!/\b50\b/.test(txt)) throw new Error('coin amount 50 not shown');
+  });
+
+  await check('H2-C: status (OPEN) and created/expires info are displayed', async () => {
+    const txt = await hostCard().innerText();
+    if (!txt.includes('OPEN')) throw new Error('OPEN badge missing');
+    if (!txt.includes('created') || !txt.includes('expires')) throw new Error('created/expires info missing');
+  });
+
+  await check('H2-C: CANCEL is available for the open/pending trade', async () => {
+    const btn = hostCard().locator('button:has-text("CANCEL")').first();
+    await btn.waitFor({ state: 'visible', timeout: 10000 });
+    if (await btn.isDisabled()) throw new Error('CANCEL disabled for OPEN trade');
+  });
+
+  await check('H2-C: clicking CANCEL opens the confirmation dialog', async () => {
+    await hostCard().locator('button:has-text("CANCEL")').first().click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await page.waitForFunction(() => /CANCEL TRADE\?/.test(document.body.innerText), undefined, { timeout: 10000 });
+  });
+
+  await check('H2-C: the confirmation clearly identifies the trade', async () => {
+    const txt = await page.locator('[role="dialog"]').innerText();
+    if (!txt.includes('E2E Team Alpha')) throw new Error('from team not in dialog');
+    if (!txt.includes('E2E Team Beta')) throw new Error('to team not in dialog');
+    if (!txt.includes('HCQ1')) throw new Error('offered not in dialog');
+    if (!txt.includes('HCQ2')) throw new Error('requested not in dialog');
+    if (!/\b50\b/.test(txt)) throw new Error('coins not in dialog');
+  });
+
+  await check('H2-C: dismissing the confirmation does NOT cancel the trade', async () => {
+    await dialogExactBtn('CANCEL').click();
+    await page.waitForSelector('[role="dialog"]', { state: 'detached', timeout: 8000 }).catch(() => {});
+    const tr = await hostTrade();
+    if (!tr || tr.state !== 'OPEN') throw new Error(`state after dismiss = ${tr?.state}`);
+    await waitForBody(page, 'ACTIVE TRADES (1)', 15000);
+    if ((await hostCard().count()) === 0) throw new Error('trade left ACTIVE after dismiss');
+  });
+
+  await check('H2-C: confirming the dialog cancels the trade (server-authoritative)', async () => {
+    await hostCard().locator('button:has-text("CANCEL")').first().click();
+    await page.waitForSelector('[role="dialog"]', { timeout: 10000 });
+    await page.waitForFunction(() => /CANCEL TRADE\?/.test(document.body.innerText), undefined, { timeout: 10000 });
+    await page.fill('input#cancel-trade-reason', 'E2E disputed offer');
+    await dialogExactBtn('CANCEL TRADE').click();
+    await page.waitForFunction(
+      (arg) => fetch(`/api/host/state`, { headers: { Authorization: `Bearer ${arg.token}` } })
+        .then((r) => r.json())
+        .then((d) => (d?.trades ?? []).some((x) => x.id === arg.id && x.state === 'CANCELLED'))
+        .catch(() => false),
+      { token: hostToken, id: tradeId },
+      { timeout: 15000 },
+    );
+    const tr = await hostTrade();
+    if (!tr || tr.state !== 'CANCELLED') throw new Error(`state = ${tr?.state}`);
+  });
+
+  await check('H2-C: host UI reflects authoritative state — trade leaves ACTIVE', async () => {
+    await waitForBody(page, 'ACTIVE TRADES (0)', 15000);
+    await waitForBody(page, 'No active trades', 15000);
+    if ((await hostCard().count()) !== 0) throw new Error('cancelled trade still in ACTIVE');
+  });
+
+  await check('H2-C: HISTORY reflects the cancelled status', async () => {
+    await page.locator('button:has-text("HISTORY (1)")').first().click();
+    const card = hostCard();
+    await card.waitFor({ state: 'visible', timeout: 15000 });
+    const txt = await card.innerText();
+    if (!txt.includes('CANCELLED')) throw new Error('CANCELLED badge missing in HISTORY');
+    if ((await card.locator('button:has-text("CANCEL")').count()) !== 0) throw new Error('CANCEL offered on a cancelled trade');
+  });
+
+  await check('H2-C: stale behavior — a second cancel of the resolved trade is rejected (409)', async () => {
+    const st = await apiJson(`/host/trades/${tradeId}/cancel`, { method: 'POST', token: hostToken, body: { reason: 'stale retry' } });
+    if (st.status !== 409) throw new Error(`expected 409 got ${st.status}: ${JSON.stringify(st.data)}`);
+    const tr = await hostTrade();
+    if (!tr || tr.state !== 'CANCELLED') throw new Error(`state after stale retry = ${tr?.state}`);
+  });
+
+  await globalThis.__betaCtx?.close?.().catch(() => {});
   await globalThis.__teamPage?.context?.close?.().catch(() => {});
   await globalThis.__hostCtx?.close?.().catch(() => {});
   await browser.close();

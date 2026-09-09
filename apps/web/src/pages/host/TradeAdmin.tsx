@@ -3,6 +3,8 @@ import { ArrowRightLeft, ArrowUpRight, ArrowDownLeft, X } from 'lucide-react';
 import { Card, CardBody, Badge, Button, Modal, FormField, TextInput, EmptyState, Tabs, TabList, Tab, TabPanels, TabPanel } from '../../components/ui';
 import { useHostStore } from '../../stores/host';
 import { useHostAction } from '../../hooks/useHostAction';
+import { useHostReady, readinessTitle } from '../../hooks/useHostReady';
+import { useConnectionStore } from '../../stores/connection';
 import { formatCoins, formatTime, DIFFICULTY_BADGE_TONE } from '../../lib/format';
 import type { TradeDto, TradeState } from '@wcc/shared';
 
@@ -33,6 +35,8 @@ const STATE_TONE: Record<TradeState, 'muted' | 'positive' | 'warn' | 'negative'>
 export function TradeAdmin() {
   const trades = useHostStore((s) => s.trades);
   const { cancelTrade, isBusy, isBusyAction } = useHostAction();
+  const ready = useHostReady();
+  const status = useConnectionStore((s) => s.status);
 
   const [filter, setFilter] = useState<'ACTIVE' | 'HISTORY'>('ACTIVE');
   const [modal, setModal] = useState<TradeDto | null>(null);
@@ -74,7 +78,7 @@ export function TradeAdmin() {
             ) : (
               <div className="space-y-2">
                 {active.map((t) => (
-                  <TradeCard key={t.id} trade={t} onCancel={() => openModal(t)} canCancel />
+                  <TradeCard key={t.id} trade={t} onCancel={() => openModal(t)} canCancel ready={ready} status={status} />
                 ))}
               </div>
             )}
@@ -145,10 +149,14 @@ function TradeCard({
   trade,
   canCancel = false,
   onCancel,
+  ready = true,
+  status = 'connected',
 }: {
   trade: TradeDto;
   canCancel?: boolean;
   onCancel: () => void;
+  ready?: boolean;
+  status?: string;
 }) {
   return (
     <Card>
@@ -199,7 +207,14 @@ function TradeCard({
               </div>
             )}
             {canCancel && (
-              <Button variant="danger" size="sm" className="mt-2" onClick={onCancel}>
+              <Button
+                variant="danger"
+                size="sm"
+                className="mt-2"
+                disabled={!ready}
+                title={readinessTitle(status as any, ready) ?? undefined}
+                onClick={onCancel}
+              >
                 <X className="size-3.5" /> CANCEL
               </Button>
             )}

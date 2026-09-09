@@ -2,6 +2,8 @@ import { create } from 'zustand';
 import type { ActivityDto, HostGameState, HostPurchase, LeaderboardRow, QuestionAdmin, TeamPresenceDto, TeamSummary, TradeDto, TransactionDto } from '@wcc/shared';
 import type { GameMeta, AuditLogEntry } from '@wcc/shared';
 
+import { useConnectionStore } from './connection';
+
 /**
  * Host dashboard state — an administrative mirror of the game. Presence is
  * keyed by teamId so the host lobby can show "2/2 connected" per team; teams
@@ -23,6 +25,11 @@ interface HostState {
   presence: Record<string, TeamPresenceDto>;
   connectedCount: (teamId: string) => number | null;
 
+  /** Has the host ever received a valid authoritative state:sync? */
+  hasLoaded: boolean;
+  /** Generation of the connection that the last authoritative state:sync belongs to. */
+  lastSyncGeneration: number | null;
+
   applyState: (s: HostGameState) => void;
   applyPresence: (p: TeamPresenceDto) => void;
   reset: () => void;
@@ -40,6 +47,8 @@ const initial = {
   trades: [],
   lastEventSeq: 0,
   presence: {},
+  hasLoaded: false,
+  lastSyncGeneration: null,
 };
 
 export const useHostStore = create<HostState>()((set, get) => ({
@@ -61,6 +70,8 @@ export const useHostStore = create<HostState>()((set, get) => ({
       purchases: s.purchases ?? [],
       trades: s.trades ?? [],
       lastEventSeq: s.lastEventSeq,
+      hasLoaded: true,
+      lastSyncGeneration: useConnectionStore.getState().connectedGeneration,
     }),
 
   applyPresence: (p) => set((cur) => ({ presence: { ...cur.presence, [p.teamId]: p } })),

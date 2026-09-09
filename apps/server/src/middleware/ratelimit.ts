@@ -21,7 +21,7 @@ export const actionLimiter = rateLimit({
 
 export const apiLimiter = rateLimit({
   windowMs: 60_000,
-  max: 300,
+  max: isTest ? 10_000 : 300,
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: { code: 'RATE_LIMITED', message: 'API rate limit exceeded.' } },

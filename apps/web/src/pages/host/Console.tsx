@@ -13,6 +13,8 @@ import {
   AlertTriangle,
   Activity,
   Flag,
+  AlertCircle,
+  RefreshCw,
 } from 'lucide-react';
 import { Card, CardBody, Badge, Button, EmptyState, Stat, Modal } from '../../components/ui';
 import { useHostStore } from '../../stores/host';
@@ -20,6 +22,8 @@ import { useAuthStore } from '../../stores/auth';
 import { useServerPhase, useServerPhaseRules } from '../../stores/clock';
 import { useRemainingTime } from '../../hooks/useRemainingTime';
 import { useHostAction } from '../../hooks/useHostAction';
+import { useHostReady, readinessTitle } from '../../hooks/useHostReady';
+import { useConnectionStore } from '../../stores/connection';
 import { TeamAdmin } from './TeamAdmin';
 import { TradeAdmin } from './TradeAdmin';
 import { formatCoins, formatClock, formatTime, timeAgo } from '../../lib/format';
@@ -99,6 +103,7 @@ export function HostConsole() {
   const transactions = useHostStore((s) => s.transactions);
   const lastEventSeq = useHostStore((s) => s.lastEventSeq);
   const connectedCount = useHostStore((s) => s.connectedCount);
+  const hasLoaded = useHostStore((s) => s.hasLoaded);
 
   const { run, isBusy, isBusyAction } = useHostAction();
   const [confirmAction, setConfirmAction] = useState<'close-market' | 'finalize' | 'reset' | null>(null);
@@ -109,6 +114,10 @@ export function HostConsole() {
     const ok = await run(confirmAction);
     if (ok) setConfirmAction(null);
   };
+
+  // Readiness: authoritative state loaded AND connection healthy.
+  const ready = useHostReady();
+  const status = useConnectionStore((s) => s.status);
 
   // Authoritative phase + clock come from time:sync (server); meta.state is the
   // fallback until the first pulse lands.
@@ -159,8 +168,34 @@ export function HostConsole() {
     serverPhase === 'MARKET_CLOSED' ||
     serverPhase === 'FINAL_SCORING';
 
+  // Loading gate: show sync state before first authoritative snapshot
+  if (!hasLoaded) {
+    return (
+      <div className="space-y-4">
+        <div className="rounded-2xl border border-ink-700 bg-ink-900/80 p-4 lg:p-5 text-center">
+          <div className="flex flex-col items-center gap-3">
+            <RefreshCw className="size-8 animate-spin text-accent" aria-hidden />
+            <div className="text-sm font-semibold uppercase tracking-widest text-fg-muted">SYNCING WITH SERVER…</div>
+            <div className="text-sm text-fg-muted">Waiting for authoritative game state</div>
+          </div>
+        </div>
+        {/* ConnectionBadge remains visible in HostShell header */}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
+      {/* Stale / reconnecting banner — compact, persistent, not a toast */}
+      {!ready && (
+        <div className="rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-sm font-semibold uppercase tracking-widest text-warn flex items-center gap-2">
+          <AlertCircle className="size-4" aria-hidden />
+          {status !== 'connected'
+            ? 'STALE — RECONNECTING…'
+            : 'RE-SYNCING WITH SERVER…'}
+        </div>
+      )}
+
       {/* ── Hero: authoritative phase + timer + server clock ─────────────── */}
       <div className="rounded-2xl border border-ink-700 bg-ink-900/80 p-4 lg:p-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
@@ -202,15 +237,15 @@ export function HostConsole() {
 
           <div className="text-right">
             <div className="text-[11px] font-semibold uppercase tracking-widest text-fg-faint">
-              {inPlay ? 'TIME REMAINING' : 'COUNTDOWN'}
+              {remaining !== null && ready ? 'TIME REMAINING' : serverPhase === 'LOBBY' ? 'GAME NOT STARTED' : 'STALE'}
             </div>
             <div
               title="Phase countdown (server-authoritative)"
               className={`mt-1 font-mono text-4xl font-bold tabular-nums leading-none lg:text-6xl ${
-                remaining !== null ? 'text-fg' : 'text-fg-faint'
-              } ${serverPhase === 'FINAL_MINUTE' && remaining !== null && remaining <= 30_000 ? 'animate-pulse text-warn' : ''}`}
+                remaining !== null && ready ? 'text-fg' : 'text-fg-faint'
+              } ${serverPhase === 'FINAL_MINUTE' && remaining !== null && remaining <= 30_000 && ready ? 'animate-pulse text-warn' : ''}`}
             >
-              {remaining !== null ? formatClock(remaining) : '--:--'}
+              {remaining !== null && ready ? formatClock(remaining) : '—'}
             </div>
             <div className="mt-1.5 flex items-center justify-end gap-2">
               <Badge tone={MARKET_TONE[mkt]}>MARKET {mkt}</Badge>
@@ -234,8 +269,9 @@ export function HostConsole() {
             <Button
               variant={serverPhase === 'LOBBY' ? 'primary' : 'secondary'}
               size="sm"
-              disabled={serverPhase !== 'LOBBY' || isBusy}
+              disabled={serverPhase !== 'LOBBY' || isBusy || !ready}
               loading={isBusyAction('start')}
+              title={readinessTitle(status, ready) ?? undefined}
               onClick={() => void run('start')}
             >
               <Sprout className="size-3.5" /> START
@@ -243,8 +279,9 @@ export function HostConsole() {
             <Button
               variant="secondary"
               size="sm"
-              disabled={(serverPhase !== 'MARKET_OPEN' && serverPhase !== 'FINAL_MINUTE') || isBusy}
+              disabled={(serverPhase !== 'MARKET_OPEN' && serverPhase !== 'FINAL_MINUTE') || isBusy || !ready}
               loading={isBusyAction('pause')}
+              title={readinessTitle(status, ready) ?? undefined}
               onClick={() => void run('pause')}
             >
               <Pause className="size-3.5" /> PAUSE
@@ -252,8 +289,9 @@ export function HostConsole() {
             <Button
               variant={serverPhase === 'PAUSED' ? 'primary' : 'ghost'}
               size="sm"
-              disabled={serverPhase !== 'PAUSED' || isBusy}
+              disabled={serverPhase !== 'PAUSED' || isBusy || !ready}
               loading={isBusyAction('resume')}
+              title={readinessTitle(status, ready) ?? undefined}
               onClick={() => void run('resume')}
             >
               <RotateCcw className="size-3.5" /> RESUME
@@ -266,9 +304,11 @@ export function HostConsole() {
                 serverPhase === 'MARKET_CLOSED' ||
                 serverPhase === 'FINAL_SCORING' ||
                 serverPhase === 'COMPLETED' ||
-                isBusy
+                isBusy ||
+                !ready
               }
               loading={isBusyAction('close-market')}
+              title={readinessTitle(status, ready) ?? undefined}
               onClick={() => setConfirmAction('close-market')}
             >
               <Scale className="size-3.5" /> CLOSE MARKET
@@ -276,8 +316,9 @@ export function HostConsole() {
             <Button
               variant="danger"
               size="sm"
-              disabled={!canEndGame || isBusy}
+              disabled={!canEndGame || isBusy || !ready}
               loading={isBusyAction('finalize')}
+              title={readinessTitle(status, ready) ?? undefined}
               onClick={() => setConfirmAction('finalize')}
             >
               <Flag className="size-3.5" /> END GAME
@@ -285,8 +326,9 @@ export function HostConsole() {
             <Button
               variant="ghost"
               size="sm"
-              disabled={serverPhase !== 'COMPLETED' || isBusy}
+              disabled={serverPhase !== 'COMPLETED' || isBusy || !ready}
               loading={isBusyAction('reset')}
+              title={readinessTitle(status, ready) ?? undefined}
               onClick={() => setConfirmAction('reset')}
             >
               <AlertTriangle className="size-3.5" /> RESET ROUND
@@ -356,7 +398,7 @@ export function HostConsole() {
               <EmptyState title="No activity yet" body="Events appear here as teams join, buy, solve, and trade." />
             ) : (
               <div className="space-y-2">
-                {activity.slice(0, 8).map((a, i) => (
+                {activity.slice(-8).reverse().map((a, i) => (
                   <div key={i} className="flex items-center justify-between gap-3 text-xs">
                     <span className="text-fg">{a.message}</span>
                     <span className="shrink-0 text-fg-muted font-mono" title={`seq ${a.seq}`}>

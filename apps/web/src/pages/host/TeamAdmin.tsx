@@ -3,6 +3,8 @@ import { ShieldCheck, Undo2, UserX, ArrowDownToLine, ArrowUpFromLine } from 'luc
 import { Card, CardBody, Badge, Button, Modal, FormField, TextInput, EmptyState } from '../../components/ui';
 import { useHostStore } from '../../stores/host';
 import { useHostAction } from '../../hooks/useHostAction';
+import { useHostReady, readinessTitle } from '../../hooks/useHostReady';
+import { useConnectionStore } from '../../stores/connection';
 import { formatCoins } from '../../lib/format';
 import type { HostPurchase, TeamSummary } from '@wcc/shared';
 
@@ -30,6 +32,8 @@ export function TeamAdmin() {
   const connectedCount = useHostStore((s) => s.connectedCount);
 
   const { disqualify, reinstate, adjustCoins, refund, isBusy, isBusyAction } = useHostAction();
+  const ready = useHostReady();
+  const status = useConnectionStore((s) => s.status);
 
   const [modal, setModal] = useState<AdminModal>(null);
 
@@ -119,8 +123,9 @@ export function TeamAdmin() {
                   <Button
                     variant="success"
                     size="sm"
-                    disabled={isBusy}
+                    disabled={isBusy || !ready}
                     loading={isBusyAction('reinstate')}
+                    title={readinessTitle(status, ready) ?? undefined}
                     onClick={() => void reinstate(t.id)}
                   >
                     <ShieldCheck className="size-3.5" /> REINSTATE
@@ -129,8 +134,9 @@ export function TeamAdmin() {
                   <Button
                     variant="danger"
                     size="sm"
-                    disabled={isBusy}
+                    disabled={isBusy || !ready}
                     loading={isBusyAction('disqualify')}
+                    title={readinessTitle(status, ready) ?? undefined}
                     onClick={() => openModal({ kind: 'disqualify', team: t })}
                   >
                     <UserX className="size-3.5" /> DISQUALIFY
@@ -140,8 +146,9 @@ export function TeamAdmin() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={isBusy}
+                  disabled={isBusy || !ready}
                   loading={isBusyAction('adjust-coins')}
+                  title={readinessTitle(status, ready) ?? undefined}
                   onClick={() => openModal({ kind: 'coins', team: t, sign: -1 })}
                 >
                   <ArrowDownToLine className="size-3.5" /> REMOVE COINS
@@ -149,8 +156,9 @@ export function TeamAdmin() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={isBusy}
+                  disabled={isBusy || !ready}
                   loading={isBusyAction('adjust-coins')}
+                  title={readinessTitle(status, ready) ?? undefined}
                   onClick={() => openModal({ kind: 'coins', team: t, sign: 1 })}
                 >
                   <ArrowUpFromLine className="size-3.5" /> ADD COINS
@@ -158,8 +166,9 @@ export function TeamAdmin() {
                 <Button
                   variant="ghost"
                   size="sm"
-                  disabled={isBusy}
+                  disabled={isBusy || !ready}
                   loading={isBusyAction('refund')}
+                  title={readinessTitle(status, ready) ?? undefined}
                   onClick={() => openModal({ kind: 'refund', team: t })}
                 >
                   <Undo2 className="size-3.5" /> REFUND

@@ -1748,3 +1748,132 @@ describe('host trade administration (H2-C)', () => {
     sock.disconnect();
   });
 });
+
+// ─── H2-D: host realtime & polish ────────────────────────────────────────
+describe('host realtime & polish (H2-D)', () => {
+  it('host socket receives full host-shaped state:sync with teams, purchases, trades, activity', async () => {
+    const g = await createGame('H2D FullState');
+    const t = await joinTeam(g.gameCode, 'H2D Team', 'Ada');
+    const q = await createQuestion(g.hostToken, question('H2DFS1'));
+    await startGame(g.gameCode, g.hostToken);
+    // Buy the question so we get purchases in the host state.
+    await request(bundle.app)
+      .post(`/api/team/questions/${q.id}/purchase`)
+      .set(hostAuth(t.teamAccessToken))
+      .send({ idempotencyKey: idem() });
+
+    const sock = hostSocket(g.gameCode, g.hostToken);
+    const sync = await once<{
+      meta: { code: string; state: string };
+      teams: { id: string; name: string; coins: number }[];
+      purchases: { questionCode: string; teamId: string }[];
+      trades: { id: string; state: string }[];
+      activity: { message: string; seq: number; at: number }[];
+      lastEventSeq: number;
+    }>(sock, 'state:sync');
+
+    // Host-shaped state must include every major section.
+    expect(sync.meta.code).toBe(g.gameCode);
+    expect(sync.meta.state).toBe('MARKET_OPEN');
+    expect(Array.isArray(sync.teams)).toBe(true);
+    expect(sync.teams.length).toBeGreaterThanOrEqual(1);
+    expect(Array.isArray(sync.purchases)).toBe(true);
+    expect(sync.purchases.length).toBeGreaterThanOrEqual(1);
+    expect(sync.purchases[0]!.questionCode).toBe('H2DFS1');
+    expect(Array.isArray(sync.trades)).toBe(true);
+    expect(Array.isArray(sync.activity)).toBe(true);
+    expect(sync.activity.length).toBeGreaterThan(0);
+    expect(typeof sync.lastEventSeq).toBe('number');
+    expect(sync.lastEventSeq).toBeGreaterThan(0);
+    sock.disconnect();
+  });
+
+  it('host receives game:event and converges to fresh authoritative state', async () => {
+    const g = await createGame('H2D EventConverge');
+    const t = await joinTeam(g.gameCode, 'H2D Conv', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+
+    const sock = hostSocket(g.gameCode, g.hostToken);
+    await once<{ meta: { state: string } }>(sock, 'state:sync'); // initial sync
+
+    // Emit a host announcement → triggers game:event on the host socket.
+    const ev = once<{ type: string }>(sock, 'game:event');
+    const ann = await request(bundle.app)
+      .post('/api/host/announcements')
+      .set(hostAuth(g.hostToken))
+      .send({ message: 'H2D convergence test' });
+    expect(ann.status).toBe(200);
+    const event = await ev;
+    expect(event.type).toBe('ANNOUNCEMENT_CREATED');
+
+    // After the event, a state:sync must arrive with the latest activity.
+    const syncP = once<{
+      activity: { message: string }[];
+      lastEventSeq: number;
+    }>(sock, 'state:sync');
+    sock.emit('req:state', { lastSeq: 0 });
+    const sync = await syncP;
+    expect(sync.activity.some((a) => a.message.includes('H2D convergence test'))).toBe(true);
+    sock.disconnect();
+  });
+
+  it('GAME_RELOAD after resetRound delivers reload event and state resets to LOBBY', async () => {
+    const g = await createGame('H2D Reload');
+    const t = await joinTeam(g.gameCode, 'H2D ReloadTeam', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+
+    const sock = hostSocket(g.gameCode, g.hostToken);
+    const initial = await once<{ meta: { state: string } }>(sock, 'state:sync');
+    expect(initial.meta.state).toBe('MARKET_OPEN');
+
+    // Collect all events from this point forward.
+    const received: string[] = [];
+    sock.onAny((ev) => received.push(ev));
+
+    const reset = await request(bundle.app)
+      .post('/api/host/reset')
+      .set(hostAuth(g.hostToken))
+      .send({ reason: 'H2D reload test' });
+    expect(reset.status).toBe(200);
+
+    // Wait until the reload event arrives (it fires synchronously on the server).
+    await new Promise<void>((resolve, reject) => {
+      const deadline = setTimeout(() => {
+        reject(new Error(`timeout — received events: ${received.join(', ')}`));
+      }, 6000);
+      const poll = () => {
+        if (received.includes('reload')) { clearTimeout(deadline); resolve(); }
+        else setTimeout(poll, 30);
+      };
+      poll();
+    });
+
+    expect(received).toContain('reload');
+    // The GAME_RELOAD event was also broadcast.
+    expect(received).toContain('game:event');
+
+    // Server-side: authoritative state must be LOBBY after reset.
+    const st = await request(bundle.app).get('/api/host/state').set(hostAuth(g.hostToken));
+    expect(st.body.meta.state).toBe('LOBBY');
+
+    // A fresh host socket must receive LOBBY state (proves state was persisted).
+    const sock2 = hostSocket(g.gameCode, g.hostToken);
+    const sync = await once<{ meta: { state: string } }>(sock2, 'state:sync');
+    expect(sync.meta.state).toBe('LOBBY');
+    sock.removeAllListeners();
+    sock.disconnect();
+    sock2.disconnect();
+  });
+
+  it('unauthorized host socket is rejected with INVALID_TOKEN', async () => {
+    const g = await createGame('H2D Unauth');
+    const sock = io(baseUrl, {
+      query: { gameCode: g.gameCode, token: 'totally-bogus-token', role: 'host', lastSeq: '0' },
+      transports: ['websocket'],
+      forceNew: true,
+    });
+    const err = await once<{ code: string }>(sock, 'error');
+    expect(err.code).toBe('UNAUTHORIZED');
+    sock.disconnect();
+  });
+});

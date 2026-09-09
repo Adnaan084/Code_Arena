@@ -1,9 +1,11 @@
 import { useCallback, useState } from 'react';
 import { api } from '../lib/api';
-import { requestState } from '../lib/socket';
+import { scheduleResync } from '../lib/socket';
 import { toast } from '../stores/toasts';
 import { friendlyError } from '../lib/errorMessages';
 import { useAuthStore } from '../stores/auth';
+import { useConnectionStore } from '../stores/connection';
+import { useHostStore } from '../stores/host';
 
 /**
  * Reusable abstraction for host console/administrative actions.
@@ -45,6 +47,21 @@ export function useHostAction() {
         toast.error('No host session', err.message);
         return { ok: false, data: null };
       }
+      // Gating: disallow administrative actions when not authoritative-ready.
+      const conn = useConnectionStore.getState();
+      const host = useHostStore.getState();
+      const ready =
+        conn.status === 'connected' &&
+        host.hasLoaded &&
+        conn.connectedGeneration > 0 &&
+        host.lastSyncGeneration !== null &&
+        host.lastSyncGeneration >= conn.connectedGeneration;
+      if (!ready) {
+        const err = { code: 'NOT_READY', message: 'Host is not ready. Waiting for authoritative state.' };
+        setLastError(err);
+        toast.error('Host not ready', 'Unavailable while disconnected or re-syncing with server.');
+        return { ok: false, data: null };
+      }
       // Duplicate-click guard: one host action at a time.
       if (busyAction !== null) return { ok: false, data: null };
 
@@ -54,10 +71,12 @@ export function useHostAction() {
       try {
         const data = await call();
         toast.success(label.done);
-        // Returning authoritative state, not a local guess: requestState pulls a
-        // full state:sync over the live socket; the event that the backend also
-        // broadcasts triggers the normal debounced resync as a belt-and-braces.
-        requestState();
+        // Deduplicate: the same successful action also broadcasts a game:event
+        // which triggers scheduleResync(350) from realtime.ts. Using the same
+        // debounced path here guarantees a single authoritative fetch regardless
+        // of arrival order (the server emits before the HTTP response, so both
+        // re-arm the shared timer inside the window).
+        scheduleResync();
         return { ok: true, data };
       } catch (err) {
         const friendly = friendlyError(err);

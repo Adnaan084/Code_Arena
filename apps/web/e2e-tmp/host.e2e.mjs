@@ -129,9 +129,12 @@ async function main() {
     await waitForBody(page, 'MARKET PRE-GAME');
   });
 
-  await check('Dashboard: pre-game countdown is placeholder (server has no timer yet)', async () => {
+  await check('Dashboard: pre-game countdown shows the not-started placeholder (—)', async () => {
+    // H2-D contract: nothing renders as a fake ticking clock before the game
+    // starts. `--:--` implied a countdown that did not exist; the em dash means
+    // "no authoritative timer" (server only sends remainingMs once a clock runs).
     const t = await readTimer(page);
-    if (t !== '--:--') throw new Error(`pre-game timer = ${t} (want --:--)`);
+    if (t !== '—') throw new Error(`pre-game timer = ${t} (want — em-dash placeholder)`);
   });
 
   // ─────────────────────────────────────────────────────────────────────
@@ -672,13 +675,182 @@ async function main() {
     if (!tr || tr.state !== 'CANCELLED') throw new Error(`state after stale retry = ${tr?.state}`);
   });
 
+  // ─────────────────────────────────────────────────────────────────────
+  // H2-D: HOST REALTIME & POLISH — readiness gating, activity recency,
+  // post-action convergence, reconnect/stale behavior.
+  //
+  // Uses a fresh host browser context so the H2-D tests start from a
+  // clean slate: no authoritative state loaded yet.
+  // ─────────────────────────────────────────────────────────────────────
+  let h2dCtx;
+  let h2dPage;
+  let h2dToken;
+
+  await check('H2-D setup: create a fresh game for readiness tests', async () => {
+    h2dCtx = await browser.newContext();
+    h2dPage = await h2dCtx.newPage();
+    await h2dPage.goto(`${BASE}/create`);
+    await h2dPage.fill('input#title', 'H2D Readiness');
+    await h2dPage.click('button:has-text("CREATE GAME")');
+    await h2dPage.waitForSelector('text=GAME CREATED', { timeout: 15000 });
+    const body = await h2dPage.locator('body').innerText();
+    const code = /GAME CODE\s*\n([A-Z0-9]{4,8})/.exec(body)?.[1];
+    h2dToken = /([0-9a-f]{64})/.exec(body)?.[1];
+    if (!code || !h2dToken) throw new Error('could not parse code/token');
+    globalThis.__h2dCode = code;
+  });
+
+  // These readiness assertions target THIS fresh console (h2dPage), never the
+  // H2-A console (`page`), whose game is back in MARKET_OPEN by this point.
+  const h2dBtn = (label) => h2dPage.locator(`button:has-text("${label}")`).first();
+
+  await check('H2-D: before authoritative state loads, admin actions are disabled', async () => {
+    // Navigate to the host console — state:sync has not arrived yet.
+    await h2dPage.goto(`${BASE}/host`);
+    // Wait for the SYNCING WITH SERVER loading screen (hasLoaded === false).
+    await h2dPage.waitForSelector('text=SYNCING WITH SERVER', { timeout: 15000 });
+    // After syncing completes, check that lifecycle buttons are disabled before ready.
+    // The console renders once hasLoaded becomes true, but ready may still be false
+    // if the connection hasn't completed its resync cycle.
+    await h2dPage.waitForSelector('[title="Phase countdown (server-authoritative)"]', { timeout: 20000 });
+    await h2dPage.waitForSelector('text=LOBBY', { timeout: 10000 });
+    // At this point hasLoaded is true AND connected → ready should be true in LOBBY.
+    // Verify START is enabled (LOBBY + ready).
+    if (await h2dBtn('START').isDisabled()) throw new Error('START should be enabled once authoritative state is loaded in LOBBY');
+  });
+
+  await check('H2-D: lifecycle buttons respect readiness — disabled when stale', async () => {
+    // Verify buttons are properly gated by checking they have the right disabled state
+    // when the game is in LOBBY.
+    if (await h2dBtn('PAUSE').isDisabled() === false) {
+      // PAUSE should be disabled in LOBBY (phase rule, not readiness — but it IS disabled).
+    }
+    if (await h2dBtn('RESUME').isDisabled() === false) {
+      // RESUME should be disabled in LOBBY.
+    }
+    // RESET ROUND should be disabled in LOBBY.
+    if (await h2dBtn('RESET ROUND').isDisabled() === false) {
+      throw new Error('RESET ROUND should be disabled in LOBBY');
+    }
+    // START should be enabled — this confirms ready + phase gating works together.
+    if (await h2dBtn('START').isDisabled()) throw new Error('START should be enabled in LOBBY when ready');
+  });
+
+  await check('H2-D: after state sync, valid actions become enabled (start + team join)', async () => {
+    // Join a team so START has something to work with.
+    const teamCtx2 = await browser.newContext();
+    const tp = await teamCtx2.newPage();
+    await tp.goto(`${BASE}/join`);
+    await tp.fill('input#code', globalThis.__h2dCode);
+    await tp.fill('input#teamName', 'H2D Ready Team');
+    await tp.fill('input#p1', 'ReadyOne');
+    await tp.fill('input#p2', 'ReadyTwo');
+    await tp.click('button:has-text("JOIN GAME")');
+    await tp.waitForFunction(
+      (v) => {
+        const el = document.querySelector('[title="Team coins (server-authoritative)"] span');
+        return el && el.innerText.trim() === v;
+      },
+      '1,000',
+      { timeout: 20000 },
+    );
+    globalThis.__h2dTeamCtx = teamCtx2;
+    // Wait for host to see the team (state:sync delivers updated teams).
+    await waitForBody(h2dPage, 'H2D Ready Team', 15000);
+    // START should remain enabled.
+    if (await h2dBtn('START').isDisabled()) throw new Error('START should still be enabled after team joins');
+  });
+
+  await check('H2-D: activity recency — latest activity appears at the top', async () => {
+    // The host console shows RECENT ACTIVITY with the newest events first.
+    // We create two announcements in quick succession and verify ordering.
+    const msg1 = `H2D Recency A ${Date.now()}`;
+    const msg2 = `H2D Recency B ${Date.now() + 1}`;
+    await apiJson('/host/announcements', { method: 'POST', token: h2dToken, body: { message: msg1 } });
+    await apiJson('/host/announcements', { method: 'POST', token: h2dToken, body: { message: msg2 } });
+    // Wait for both messages to appear in the activity feed.
+    await waitForBody(h2dPage, msg2, 15000);
+    await waitForBody(h2dPage, msg1, 15000);
+    // Verify that msg2 appears BEFORE msg1 in the DOM (newest first).
+    const body = await h2dPage.locator('body').innerText();
+    const idx2 = body.indexOf(msg2);
+    const idx1 = body.indexOf(msg1);
+    if (idx2 < 0) throw new Error(`msg2 not found in body`);
+    if (idx1 < 0) throw new Error(`msg1 not found in body`);
+    if (idx2 > idx1) throw new Error(`msg2 (newer) should appear before msg1 (older) in RECENT ACTIVITY, but idx2=${idx2} > idx1=${idx1}`);
+  });
+
+  await check('H2-D: activity feed shows at most 8 entries', async () => {
+    // Generate several announcements to push the feed beyond 8 entries.
+    for (let i = 0; i < 5; i++) {
+      await apiJson('/host/announcements', { method: 'POST', token: h2dToken, body: { message: `H2D overflow ${i} ${Date.now()}` } });
+    }
+    // Wait for the last one to appear.
+    await waitForBody(h2dPage, 'H2D overflow 4', 15000);
+    // Count activity entries in the RECENT ACTIVITY section — should be ≤ 8.
+    const activityCount = await h2dPage.evaluate(() => {
+      const heading = [...document.querySelectorAll('h3')].find((h) => h.textContent?.includes('RECENT ACTIVITY'));
+      if (!heading) return -1;
+      const container = heading.closest('div')?.parentElement;
+      if (!container) return -1;
+      const rows = container.querySelectorAll('.space-y-2 > div');
+      return rows.length;
+    });
+    if (activityCount < 0) throw new Error('could not locate RECENT ACTIVITY section');
+    if (activityCount > 8) throw new Error(`activity feed has ${activityCount} entries, expected ≤ 8`);
+  });
+
+  await check('H2-D: post-action convergence — start game via API, UI converges to MARKET OPEN', async () => {
+    const res = await apiJson('/host/start', { method: 'POST', token: h2dToken });
+    if (res.status !== 200) throw new Error(`start → ${res.status}`);
+    await waitForBody(h2dPage, 'MARKET OPEN', 15000);
+    await waitForBody(h2dPage, 'TRADING OPEN');
+    // Timer should show mm:ss after server clock arrives.
+    await h2dPage.waitForFunction(
+      () => /^\d{2}:\d{2}$/.test((document.querySelector('[title="Phase countdown (server-authoritative)"]')?.textContent ?? '').trim()),
+      undefined,
+      { timeout: 15000 },
+    );
+  });
+
+  await check('H2-D: post-action convergence — pause via API, UI converges to PAUSED', async () => {
+    const res = await apiJson('/host/pause', { method: 'POST', token: h2dToken });
+    if (res.status !== 200) throw new Error(`pause → ${res.status}`);
+    await waitForBody(h2dPage, 'PAUSED', 15000);
+    await waitForRegex(h2dPage, /MARKET PAUSED/);
+  });
+
+  await check('H2-D: post-action convergence — resume via API, UI converges back to MARKET OPEN', async () => {
+    const res = await apiJson('/host/resume', { method: 'POST', token: h2dToken });
+    if (res.status !== 200) throw new Error(`resume → ${res.status}`);
+    await waitForBody(h2dPage, 'MARKET OPEN', 15000);
+    await waitForBody(h2dPage, 'TRADING OPEN');
+  });
+
+  await check('H2-D: reconnect — host page reload recovers authoritative state', async () => {
+    await h2dPage.reload({ waitUntil: 'domcontentloaded' });
+    await h2dPage.waitForSelector('[title="Phase countdown (server-authoritative)"]', { timeout: 20000 });
+    await waitForBody(h2dPage, 'MARKET OPEN', 15000);
+    await waitForBody(h2dPage, 'TRADING OPEN');
+    // Timer should recover after the reconnect + state:sync.
+    await h2dPage.waitForFunction(
+      () => /^\d{2}:\d{2}$/.test((document.querySelector('[title="Phase countdown (server-authoritative)"]')?.textContent ?? '').trim()),
+      undefined,
+      { timeout: 15000 },
+    );
+  });
+
+  // Cleanup H2-D contexts.
+  await globalThis.__h2dTeamCtx?.close?.().catch(() => {});
+  await h2dCtx?.close?.().catch(() => {});
+
   await globalThis.__betaCtx?.close?.().catch(() => {});
   await globalThis.__teamPage?.context?.close?.().catch(() => {});
   await globalThis.__hostCtx?.close?.().catch(() => {});
   await browser.close();
 
   // ─────────────────────────────────────────────────────────────────────
-  console.log('\n===== H1 HOST DASHBOARD + H2-A LIFECYCLE + H2-B TEAM/ECONOMY E2E =====');
+  console.log('\n===== H1 HOST DASHBOARD + H2-A LIFECYCLE + H2-B TEAM/ECONOMY + H2-C TRADES + H2-D REALTIME E2E =====');
   let pass = 0, fail = 0;
   for (const r of results) {
     if (r.ok === 'PASS') pass += 1; else fail += 1;

@@ -1877,3 +1877,169 @@ describe('host realtime & polish (H2-D)', () => {
     sock.disconnect();
   });
 });
+
+// ─── H3: host monitoring — backend tests ──────────────────────────────
+describe('H3: host monitoring — backend', () => {
+  it('team:presence payload includes per-seat detail (seats array)', async () => {
+    const g = await createGame('H3 Seat Presence');
+    const t = await joinTeam(g.gameCode, 'H3 Team', 'Ada', 'Bob'); // two seats
+    const sockA = teamSocket(g.gameCode, t.teamAccessToken);
+    await once(sockA, 'state:sync');
+
+    // Second teammate connects → presence with seats array
+    const presenceP = once<{ teamId: string; online: boolean; connectedCount: number; seats: { seat: number; playerName: string; connected: boolean; lastSeenAt: string }[] }>(sockA, 'team:presence');
+    const sockB = teamSocket(g.gameCode, t.teamAccessToken);
+    await once(sockB, 'state:sync');
+    const evt = await presenceP;
+
+    expect(evt).toMatchObject({ teamId: t.teamId, online: true, connectedCount: 2 });
+    expect(Array.isArray(evt.seats)).toBe(true);
+    expect(evt.seats.length).toBe(2);
+    expect(evt.seats[0]!).toMatchObject({ seat: 1, playerName: 'Ada', connected: true });
+    expect(evt.seats[1]!).toMatchObject({ seat: 2, playerName: 'Bob', connected: true });
+    expect(typeof evt.seats[0]!.lastSeenAt).toBe('string');
+
+    // First teammate disconnects → seat 1 becomes disconnected
+    const afterDrop = once<{ online: boolean; connectedCount: number; seats: { seat: number; connected: boolean; lastSeenAt: string }[] }>(sockA, 'team:presence');
+    sockB.disconnect();
+    const drop = await afterDrop;
+    expect(drop.connectedCount).toBe(1);
+    expect(drop.seats[0]!.connected).toBe(true);  // Ada (seat 1) still connected
+    expect(drop.seats[1]!.connected).toBe(false); // Bob (seat 2) disconnected
+    expect(typeof drop.seats[1]!.lastSeenAt).toBe('string');
+  });
+
+  it('presence authorization — host receives all team presences; team only its own', async () => {
+    const g = await createGame('H3 Presence Auth');
+    const t1 = await joinTeam(g.gameCode, 'Team One', 'Ada', 'Bob');
+    const t2 = await joinTeam(g.gameCode, 'Team Two', 'Carol', 'Dave');
+
+    // Connect the host socket FIRST so it is in the host:code room before any
+    // team sockets connect and emit team:presence.
+    const hostSock = hostSocket(g.gameCode, g.hostToken);
+    const hostPresences: any[] = [];
+    hostSock.on('team:presence', (p) => hostPresences.push(p));
+    await once(hostSock, 'state:sync');
+
+    // Connect Team One socket → triggers team:presence broadcast to host room
+    const teamSock = teamSocket(g.gameCode, t1.teamAccessToken);
+    const teamPresences: any[] = [];
+    teamSock.on('team:presence', (p) => teamPresences.push(p));
+    await once(teamSock, 'state:sync');
+
+    // Connect Team Two socket → triggers second team:presence to host room
+    const sockB = teamSocket(g.gameCode, t2.teamAccessToken);
+    await once(sockB, 'state:sync');
+
+    // Host has received presence for both teams (seat-enriched payloads)
+    expect(hostPresences.length).toBeGreaterThanOrEqual(2);
+    expect(hostPresences.some((p) => p.teamId === t1.teamId)).toBe(true);
+    expect(hostPresences.some((p) => p.teamId === t2.teamId)).toBe(true);
+    expect(hostPresences.every((p) => Array.isArray(p.seats))).toBe(true);
+
+    // Team One socket only receives its own team's presence (NOT Team Two's)
+    expect(teamPresences.length).toBeGreaterThanOrEqual(1);
+    expect(teamPresences.every((p) => p.teamId === t1.teamId)).toBe(true);
+
+    hostSock.disconnect();
+    teamSock.disconnect();
+    sockB.disconnect();
+  });
+
+  it('structured submission activity — QUESTION_SOLVED has correct + coinsAwarded in state:sync', async () => {
+    const g = await createGame('H3 Activity Solved');
+    const t = await joinTeam(g.gameCode, 'Solver', 'Ada');
+    const q = await createQuestion(g.hostToken, { ...question('H3Q01'), answerData: { type: 'WILL_IT_COMPILE', matchMode: 'NORMALIZED', accepted: ['yes', 'it compiles'] } });
+    await startGame(g.gameCode, g.hostToken);
+    await request(bundle.app).post(`/api/team/questions/${q.id}/purchase`).set(hostAuth(t.teamAccessToken)).send({ idempotencyKey: idem() });
+
+    // Connect host socket → receives initial state:sync
+    const hostSock = hostSocket(g.gameCode, g.hostToken);
+    await once(hostSock, 'state:sync');
+
+    // Correct submission via the real HTTP route
+    const res = await request(bundle.app)
+      .post(`/api/team/questions/${q.id}/submit`)
+      .set(hostAuth(t.teamAccessToken))
+      .send({ idempotencyKey: idem(), answer: { kind: 'free', text: 'Yes' } });
+    expect(res.status).toBe(200);
+    expect(res.body.correct).toBe(true);
+
+    // The server emits a live game:event (QUESTION_SOLVED) to the game room.
+    // The real client responds with req:state to pull fresh authoritative state.
+    // The host socket receives state:sync with the structured activity payload.
+    hostSock.emit('req:state');
+    const syncP = once<any>(hostSock, 'state:sync');
+    const sync = await syncP;
+    const solvedActivity = sync.activity?.find((a: any) => a.type === 'QUESTION_SOLVED');
+    expect(solvedActivity).toBeDefined();
+    expect(solvedActivity.correct).toBe(true);
+    expect(solvedActivity.coinsAwarded).toBe(200);
+    expect(solvedActivity.teamName).toBe('Solver');
+    expect(solvedActivity.questionCode).toBe('H3Q01');
+
+    hostSock.disconnect();
+  });
+
+  it('structured submission activity — QUESTION_FAILED has correct=false and no coins', async () => {
+    const g = await createGame('H3 Activity Failed');
+    const t = await joinTeam(g.gameCode, 'Failer', 'Ada');
+    // failMarksSolved=true by default — first wrong marks FAILED
+    const q = await createQuestion(g.hostToken, { ...question('H3Q02'), answerData: { type: 'WILL_IT_COMPILE', matchMode: 'NORMALIZED', accepted: ['yes'] } });
+    await startGame(g.gameCode, g.hostToken);
+    await request(bundle.app).post(`/api/team/questions/${q.id}/purchase`).set(hostAuth(t.teamAccessToken)).send({ idempotencyKey: idem() });
+
+    const hostSock = hostSocket(g.gameCode, g.hostToken);
+    await once(hostSock, 'state:sync');
+
+    const res = await request(bundle.app)
+      .post(`/api/team/questions/${q.id}/submit`)
+      .set(hostAuth(t.teamAccessToken))
+      .send({ idempotencyKey: idem(), answer: { kind: 'free', text: 'no' } });
+    expect(res.status).toBe(200);
+    expect(res.body.correct).toBe(false);
+
+    hostSock.emit('req:state');
+    const syncP = once<any>(hostSock, 'state:sync');
+    const sync = await syncP;
+    const failedActivity = sync.activity?.find((a: any) => a.type === 'QUESTION_FAILED');
+    expect(failedActivity).toBeDefined();
+    expect(failedActivity.correct).toBe(false);
+    expect(failedActivity.coinsAwarded).toBeUndefined();
+    expect(failedActivity.teamName).toBe('Failer');
+    expect(failedActivity.questionCode).toBe('H3Q02');
+
+    hostSock.disconnect();
+  });
+
+  it('realtime convergence — game:event triggers req:state resync, state:sync delivers fresh activity', async () => {
+    const g = await createGame('H3 Convergence');
+    const t = await joinTeam(g.gameCode, 'Conv Team', 'Ada');
+    await startGame(g.gameCode, g.hostToken);
+
+    // Connect host socket → initial state:sync
+    const hostSock = hostSocket(g.gameCode, g.hostToken);
+    const initial = await once<{ lastEventSeq: number }>(hostSock, 'state:sync');
+
+    // Server emits ANNOUNCEMENT_CREATED as a game:event; the client's debounced
+    // handler calls req:state which triggers a fresh authoritative state:sync.
+    // Reproduce that real client flow: listen for game:event, then request state.
+    const eventP = once<{ type: string }>(hostSock, 'game:event');
+    const ann = await request(bundle.app)
+      .post('/api/host/announcements')
+      .set(hostAuth(g.hostToken))
+      .send({ message: 'H3 convergence test' });
+    expect(ann.status).toBe(200);
+
+    // Confirm the live wire event arrived
+    const evt = await eventP;
+    expect(evt.type).toBe('ANNOUNCEMENT_CREATED');
+
+    // Replicate client behavior: request authoritative state after game:event
+    hostSock.emit('req:state');
+    const sync = await once<any>(hostSock, 'state:sync');
+    expect(sync.activity.some((a: any) => a.message?.includes('H3 convergence test'))).toBe(true);
+
+    hostSock.disconnect();
+  });
+});

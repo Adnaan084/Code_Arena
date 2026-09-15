@@ -156,9 +156,10 @@ export function toLeaderboard(
 }
 
 export function toActivity(
-  e: Pick<GameEvent, 'id' | 'type' | 'message' | 'questionCode' | 'at'> & { team?: { name: string } | null },
+  e: Pick<GameEvent, 'id' | 'type' | 'message' | 'questionCode' | 'at' | 'payload'> & { team?: { name: string } | null },
 ): ActivityDto {
-  return {
+  const payload = (e.payload ?? {}) as Record<string, unknown>;
+  const result: ActivityDto = {
     seq: Number(e.id),
     type: e.type,
     message: e.message,
@@ -166,6 +167,12 @@ export function toActivity(
     questionCode: e.questionCode,
     at: e.at.toISOString(),
   };
+  // Structured submission fields for QUESTION_SOLVED / QUESTION_FAILED.
+  if (e.type === 'QUESTION_SOLVED' || e.type === 'QUESTION_FAILED') {
+    if (typeof payload.correct === 'boolean') result.correct = payload.correct;
+    if (typeof payload.reward === 'number' && payload.reward > 0) result.coinsAwarded = payload.reward;
+  }
+  return result;
 }
 
 export function toMarketItem(

@@ -78,6 +78,13 @@ export interface TimeSyncDto {
   phase: PhaseRules;
 }
 
+export interface SeatPresence {
+  seat: number;
+  playerName: string;
+  connected: boolean;
+  lastSeenAt: string | null;
+}
+
 export interface TeamPresenceDto {
   teamId: string;
   name: string;
@@ -85,6 +92,8 @@ export interface TeamPresenceDto {
   /** How many team sockets are currently connected (0..playersPerTeam). */
   connectedCount: number;
   disconnectedAt: string | null;
+  /** Per-seat detail — present on host-scope emissions when seat data is available. */
+  seats?: SeatPresence[];
 }
 
 /** Map of ws event name → payload type. */

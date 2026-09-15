@@ -221,6 +221,10 @@ export interface ActivityDto {
   teamName: string | null;
   questionCode: string | null;
   at: string;
+  /** Structured submission result — present for QUESTION_SOLVED / QUESTION_FAILED. */
+  correct?: boolean;
+  /** Coins awarded — present for QUESTION_SOLVED. */
+  coinsAwarded?: number;
 }
 
 export interface LeaderboardRow {

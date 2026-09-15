@@ -10,6 +10,7 @@ import { listQuestions } from '../domain/questions';
 import { getTransactions, getAuditLog, listPurchases } from '../domain/admin';
 import { expireStaleTrades, listHostTrades } from '../domain/trades';
 import { effectiveState, phaseRules, type RuleConfig } from '@wcc/shared';
+import type { SeatPresence } from '@wcc/shared';
 
 export interface SioHandle {
   /** Broadcast domain events to the game room (host + team + display sockets). */
@@ -33,6 +34,42 @@ function toWireEvent(e: { type: string; at: Date; questionCode: string | null })
  * conditional claims, so even overlapping pulses (e.g. a second server process)
  * would be safe.
  */
+/**
+ * Build a team:presence payload enriched with per-seat detail for the host.
+ * Seats (from TeamMember) are matched to the team's connected socket count —
+ * the host sees which seats are connected and when they were last active.
+ */
+async function buildPresence(
+  teamId: string,
+  name: string,
+  connectedCount: number,
+  online: boolean,
+  disconnectedAt?: string | null,
+) {
+  const members = await prisma.teamMember.findMany({
+    where: { teamId },
+    orderBy: { seat: 'asc' },
+    select: { seat: true, playerName: true, lastSeenAt: true },
+  });
+  const seats: SeatPresence[] = members.map((m) => ({
+    seat: m.seat,
+    playerName: m.playerName,
+    // Conservative: seat is "connected" if the team has connected sockets and
+    // there are at least that many members. Without per-socket seat tracking,
+    // we mark the first N seats as connected where N = connectedCount.
+    connected: m.seat <= connectedCount,
+    lastSeenAt: m.lastSeenAt.toISOString(),
+  }));
+  return {
+    teamId,
+    name,
+    online,
+    connectedCount,
+    disconnectedAt: disconnectedAt ?? (online ? null : new Date().toISOString()),
+    seats,
+  };
+}
+
 export function createSocketServer(app: Express, http: HttpServer) {
   const io = new IOServer(http, {
     cors: { origin: '*', methods: ['GET', 'POST'] },
@@ -105,7 +142,7 @@ export function createSocketServer(app: Express, http: HttpServer) {
         await prisma.team.update({ where: { id: team.id }, data: { online: true, disconnectedAt: null } });
         // Both hosts and teammates see presence so "1/2 connected" is visible in-app.
         const connectedCount = (await io.in(`team:${team.id}`).fetchSockets()).length;
-        const presence = { teamId: team.id, name: team.name, online: true, connectedCount, disconnectedAt: null };
+        const presence = await buildPresence(team.id, team.name, connectedCount, true);
         io.to(`host:${game.code}`).emit('team:presence', presence);
         io.to(`team:${team.id}`).emit('team:presence', presence);
       }
@@ -132,13 +169,9 @@ export function createSocketServer(app: Express, http: HttpServer) {
         if (connectedCount === 0) {
           await prisma.team.update({ where: { id: team.id }, data: { online: false, disconnectedAt: new Date() } });
         }
-        const presence = {
-          teamId: team.id,
-          name: team.name,
-          online: connectedCount > 0,
-          connectedCount,
-          disconnectedAt: connectedCount === 0 ? new Date().toISOString() : null,
-        };
+        const online = connectedCount > 0;
+        const disconnectedAt = connectedCount === 0 ? new Date().toISOString() : null;
+        const presence = await buildPresence(team.id, team.name, connectedCount, online, disconnectedAt);
         io.to(`host:${game.code}`).emit('team:presence', presence);
         io.to(`team:${team.id}`).emit('team:presence', presence);
       }

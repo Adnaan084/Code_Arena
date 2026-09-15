@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { ArrowRightLeft, ArrowUpRight, ArrowDownLeft, X } from 'lucide-react';
+import { ArrowRightLeft, ArrowUpRight, ArrowDownLeft, X, Timer } from 'lucide-react';
 import { Card, CardBody, Badge, Button, Modal, FormField, TextInput, EmptyState, Tabs, TabList, Tab, TabPanels, TabPanel } from '../../components/ui';
 import { useHostStore } from '../../stores/host';
 import { useHostAction } from '../../hooks/useHostAction';
 import { useHostReady, readinessTitle } from '../../hooks/useHostReady';
 import { useConnectionStore } from '../../stores/connection';
-import { formatCoins, formatTime, DIFFICULTY_BADGE_TONE } from '../../lib/format';
+import { useTradeRemaining } from '../../hooks/useTradeRemaining';
+import { formatCoins, formatTime, formatClock, DIFFICULTY_BADGE_TONE } from '../../lib/format';
 import type { TradeDto, TradeState } from '@wcc/shared';
 
 /**
@@ -158,6 +159,12 @@ function TradeCard({
   ready?: boolean;
   status?: string;
 }) {
+  // OPEN trades show a live expiration countdown anchored to the authoritative
+  // server clock (see useTradeRemaining). It stops showing once the trade leaves
+  // OPEN — the backend moves it to HISTORY through the existing authoritative flow.
+  const remaining = useTradeRemaining(trade.state === 'OPEN' ? trade.expiresAt : null);
+  const showCountdown = trade.state === 'OPEN' && remaining !== null;
+
   return (
     <Card>
       <CardBody className="p-3">
@@ -200,8 +207,18 @@ function TradeCard({
           </div>
 
           <div className="shrink-0 text-right">
+            {showCountdown && (
+              <div className={remaining! <= 0 ? 'text-fg-faint' : ''}>
+                <div className={`font-mono text-lg font-bold tabular-nums ${remaining! <= 30_000 ? 'text-warn animate-pulse' : 'text-fg'}`}>
+                  {formatClock(remaining!)}
+                </div>
+                <div className="text-[10px] text-fg-muted uppercase tracking-widest flex items-center justify-end gap-1">
+                  <Timer className="size-3" aria-hidden /> Expires
+                </div>
+              </div>
+            )}
             {trade.coins > 0 && (
-              <div>
+              <div className={showCountdown ? 'mt-1.5' : ''}>
                 <div className="font-mono text-lg font-bold text-warn">{formatCoins(trade.coins)}</div>
                 <div className="text-[10px] text-fg-muted">COINS</div>
               </div>

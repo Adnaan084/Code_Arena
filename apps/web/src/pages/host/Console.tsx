@@ -26,6 +26,8 @@ import { useHostReady, readinessTitle } from '../../hooks/useHostReady';
 import { useConnectionStore } from '../../stores/connection';
 import { TeamAdmin } from './TeamAdmin';
 import { TradeAdmin } from './TradeAdmin';
+import { AttentionPanel } from './AttentionPanel';
+import { ActivityFeed } from './ActivityFeed';
 import { formatCoins, formatClock, formatTime, timeAgo } from '../../lib/format';
 import type { DisplayState } from '@wcc/shared';
 
@@ -99,7 +101,6 @@ export function HostConsole() {
   const meta = useHostStore((s) => s.meta);
   const teams = useHostStore((s) => s.teams);
   const leaderboard = useHostStore((s) => s.leaderboard);
-  const activity = useHostStore((s) => s.activity);
   const transactions = useHostStore((s) => s.transactions);
   const lastEventSeq = useHostStore((s) => s.lastEventSeq);
   const connectedCount = useHostStore((s) => s.connectedCount);
@@ -370,6 +371,9 @@ export function HostConsole() {
         </div>
       </div>
 
+      {/* ── H3: Attention panel — situations requiring host attention ──── */}
+      <AttentionPanel />
+
       {/* ── H2-B team administration + economy controls ─────────────────── */}
       <div>
         <div className="mb-2 flex items-center justify-between gap-3">
@@ -385,31 +389,8 @@ export function HostConsole() {
       <TradeAdmin />
 
       <div className="grid gap-4 lg:grid-cols-2">
-        {/* ── Recent activity (live feed) ────────────────────────────────── */}
-        <Card>
-          <CardBody className="pt-2">
-            <div className="mb-2 flex items-center justify-between gap-3">
-              <h3 className="flex items-center gap-1.5 text-sm font-semibold uppercase tracking-widest text-fg-muted">
-                <Activity className="size-4" aria-hidden /> RECENT ACTIVITY
-              </h3>
-              <span className="text-[11px] text-fg-muted">{activity.length} events · seq {lastEventSeq}</span>
-            </div>
-            {activity.length === 0 ? (
-              <EmptyState title="No activity yet" body="Events appear here as teams join, buy, solve, and trade." />
-            ) : (
-              <div className="space-y-2">
-                {activity.slice(-8).reverse().map((a, i) => (
-                  <div key={i} className="flex items-center justify-between gap-3 text-xs">
-                    <span className="text-fg">{a.message}</span>
-                    <span className="shrink-0 text-fg-muted font-mono" title={`seq ${a.seq}`}>
-                      {timeAgo(a.at)}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardBody>
-        </Card>
+        {/* ── Recent activity (live feed with structured solves/fails) ───── */}
+        <ActivityFeed />
 
         {/* ── Leaderboard ranking summary ────────────────────────────────── */}
         <Card>

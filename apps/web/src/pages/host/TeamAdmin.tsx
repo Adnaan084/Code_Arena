@@ -5,8 +5,8 @@ import { useHostStore } from '../../stores/host';
 import { useHostAction } from '../../hooks/useHostAction';
 import { useHostReady, readinessTitle } from '../../hooks/useHostReady';
 import { useConnectionStore } from '../../stores/connection';
-import { formatCoins } from '../../lib/format';
-import type { HostPurchase, TeamSummary } from '@wcc/shared';
+import { formatCoins, timeAgo } from '../../lib/format';
+import type { HostPurchase, SeatPresence, TeamSummary } from '@wcc/shared';
 
 /**
  * H2-B — Host team administration + economy controls.
@@ -26,10 +26,28 @@ type AdminModal =
 
 const TEAM_TONE = { ACTIVE: 'positive', DISQUALIFIED: 'negative' } as const;
 
+/** Compact per-seat presence line shown on the console team rows. */
+function SeatRow({ seat }: { seat: SeatPresence }) {
+  return (
+    <span className="inline-flex items-center gap-1 text-xs text-fg-muted">
+      <span className="text-fg-faint">Seat {seat.seat}</span>
+      <span className="font-medium text-fg">{seat.playerName}</span>
+      {seat.connected ? (
+        <span className="text-emerald-400" title="connected">●</span>
+      ) : (
+        <span className="text-fg-faint" title="disconnected">
+          ○ {seat.lastSeenAt ? timeAgo(seat.lastSeenAt) : '—'}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export function TeamAdmin() {
   const teams = useHostStore((s) => s.teams);
   const purchases = useHostStore((s) => s.purchases);
   const connectedCount = useHostStore((s) => s.connectedCount);
+  const presence = useHostStore((s) => s.presence);
 
   const { disqualify, reinstate, adjustCoins, refund, isBusy, isBusyAction } = useHostAction();
   const ready = useHostReady();
@@ -117,6 +135,12 @@ export function TeamAdmin() {
                   <span>{connectedCount(t.id) ?? (t.online ? 1 : 0)} online</span>
                 </div>
               </div>
+
+              {presence[t.id]?.seats && presence[t.id]!.seats!.length > 0 && (
+                <div className="flex flex-wrap items-center gap-3">
+                  {presence[t.id]!.seats!.map((seat) => <SeatRow key={seat.seat} seat={seat} />)}
+                </div>
+              )}
 
               <div className="flex flex-wrap items-center gap-2">
                 {disqualified ? (

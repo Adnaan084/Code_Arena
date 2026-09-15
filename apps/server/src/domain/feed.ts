@@ -41,7 +41,7 @@ export async function createEvent(
   return { ...row, id: row.id.toString() };
 }
 
-export type ActivityQuery = Pick<GameEvent, 'id' | 'type' | 'message' | 'questionCode' | 'at'> & {
+export type ActivityQuery = Pick<GameEvent, 'id' | 'type' | 'message' | 'questionCode' | 'at' | 'payload'> & {
   team?: { name: string } | null;
 };
 
